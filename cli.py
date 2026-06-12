@@ -3188,6 +3188,13 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         self.bell_on_complete = CLI_CONFIG["display"].get("bell_on_complete", False)
         # show_reasoning: display model thinking/reasoning before the response
         self.show_reasoning = CLI_CONFIG["display"].get("show_reasoning", False)
+        # Live web_extract summarization box (reasoning-style). Registered
+        # process-wide; no-op for runs that never summarize a web page.
+        try:
+            from tools.summary_display import set_summary_stream_callback
+            set_summary_stream_callback(self._on_summary_stream)
+        except Exception:
+            logger.debug("Failed to register summary stream callback", exc_info=True)
         _configure_output_history(
             enabled=CLI_CONFIG["display"].get("persistent_output", True),
             max_lines=CLI_CONFIG["display"].get("persistent_output_max_lines", 200),
@@ -4662,6 +4669,55 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             if deferred:
                 self._deferred_content = ""
                 self._emit_stream_text(deferred)
+
+    # ── Web-extract summary streaming (reasoning-style box) ─────────────
+
+    def _on_summary_stream(self, event: str, **kwargs) -> None:
+        """Render web_extract summarization tokens in a dim live box.
+
+        Mirrors the reasoning-box UX: opens a dim 'Summarizing' box when the
+        summarizer LLM starts streaming, streams its tokens line-by-line,
+        and closes the box with a char count when done. Registered with
+        tools.summary_display; called from the summarizer's event loop
+        thread, so output goes through _cprint (patch_stdout-safe).
+        """
+        try:
+            if event == "start":
+                url = kwargs.get("url", "")
+                w = self._scrollback_box_width()
+                label = " Summarizing "
+                if url:
+                    short = url if len(url) <= w - 20 else url[: w - 23] + "..."
+                    label = f" Summarizing · {short} "
+                fill = w - 2 - len(label)
+                _cprint(f"\n{_DIM}┌─{label}{'─' * max(fill - 1, 0)}┐{_RST}")
+                self._summary_box_opened = True
+                self._summary_buf = ""
+            elif event == "delta":
+                if not getattr(self, "_summary_box_opened", False):
+                    return
+                self._summary_buf = getattr(self, "_summary_buf", "") + kwargs.get("text", "")
+                while "\n" in self._summary_buf:
+                    line, self._summary_buf = self._summary_buf.split("\n", 1)
+                    _cprint(f"{_DIM}{line}{_RST}")
+                if len(self._summary_buf) > 80:
+                    _cprint(f"{_DIM}{self._summary_buf}{_RST}")
+                    self._summary_buf = ""
+            elif event == "end":
+                if not getattr(self, "_summary_box_opened", False):
+                    return
+                buf = getattr(self, "_summary_buf", "")
+                if buf:
+                    _cprint(f"{_DIM}{buf}{_RST}")
+                    self._summary_buf = ""
+                w = self._scrollback_box_width()
+                chars = kwargs.get("char_count", 0)
+                tail = f" {chars:,} chars " if kwargs.get("ok") else " summarization fell back "
+                fill = w - 2 - len(tail)
+                _cprint(f"{_DIM}└{'─' * max(fill - 1, 0)}{tail}┘{_RST}")
+                self._summary_box_opened = False
+        except Exception:
+            logger.debug("Summary stream render failed", exc_info=True)
 
     def _stream_delta(self, text) -> None:
         """Line-buffered streaming callback for real-time token rendering.

@@ -41,6 +41,7 @@ import logging
 import os
 import re
 import asyncio
+import threading
 from typing import List, Dict, Any, Optional, TYPE_CHECKING
 import httpx  # noqa: F401 — kept at module top so tests can patch tools.web_tools.httpx
 # After the web-provider plugin migration (PR #25182), the Firecrawl SDK
@@ -346,6 +347,64 @@ def _web_requires_env() -> list[str]:
 
 DEFAULT_MIN_LENGTH_FOR_SUMMARIZATION = 5000
 
+
+# ---------------------------------------------------------------------------
+# Source registry — stable numbered citation IDs for grounding
+# ---------------------------------------------------------------------------
+# Perplexity-style grounding works because the model only ever emits small
+# stable integers ("[3]") that were assigned at retrieval time — it cannot
+# hallucinate a URL. We keep a process-wide URL → ID map so the same page
+# keeps the same citation number across web_search and web_extract calls
+# within a session, and annotate every result with its marker.
+#
+# Research basis: ALCE (arXiv:2305.14627) shows citing-during-generation from
+# numbered snippets beats post-hoc attribution; WebGPT (arXiv:2112.09332)
+# grounds answers in verbatim quotes collected at browse time. The summarizer
+# prompts below preserve verbatim quotes for that reason.
+_source_registry: Dict[str, int] = {}
+_source_registry_lock = threading.Lock()
+
+
+def _normalize_source_url(url: str) -> str:
+    """Canonicalize a URL for registry identity (strip fragment, trailing /)."""
+    u = (url or "").strip()
+    if "#" in u:
+        u = u.split("#", 1)[0]
+    return u.rstrip("/") or u
+
+
+def get_source_id(url: str) -> int:
+    """Return the stable citation ID for ``url``, assigning one if new."""
+    key = _normalize_source_url(url)
+    with _source_registry_lock:
+        sid = _source_registry.get(key)
+        if sid is None:
+            sid = len(_source_registry) + 1
+            _source_registry[key] = sid
+        return sid
+
+
+def reset_source_registry() -> None:
+    """Clear the URL → citation-ID map (tests / new sessions)."""
+    with _source_registry_lock:
+        _source_registry.clear()
+
+
+CITATION_GUIDANCE = (
+    "GROUNDING: Each result has a stable source id like [3]. When you answer "
+    "the user using facts from these sources, cite by placing the bracketed "
+    "id(s) immediately after each sentence they support, e.g. 'Ice is less "
+    "dense than water.[1][2]' — no space before the bracket, at most 3 ids "
+    "per sentence. Cite while writing, per supported sentence (not one "
+    "citation dumped at the end). Only cite ids that appear in tool results "
+    "you actually received; never invent an id or cite a source you did not "
+    "read. Claims from your own knowledge get no citation. If sources "
+    "conflict, present both with their ids. End the answer with a 'Sources:' "
+    "list mapping each cited id to its URL (e.g. '[1] https://...') — list "
+    "only ids you cited."
+)
+
+
 def _is_nous_auxiliary_client(client: Any) -> bool:
     """Return True when the resolved auxiliary backend is Nous Portal."""
     from urllib.parse import urlparse
@@ -478,6 +537,96 @@ async def process_content_with_llm(
         return truncated
 
 
+async def _try_stream_summarizer(
+    aux_client: Any,
+    model: str,
+    extra_body: Dict[str, Any],
+    system_prompt: str,
+    user_prompt: str,
+    max_tokens: int,
+    context_str: str = "",
+) -> Optional[str]:
+    """Attempt a streaming summarizer call mirrored to the live display.
+
+    Returns the full summary text on success, or ``None`` to signal the
+    caller to fall back to the standard non-streaming path (no callback
+    registered, display slot busy, provider doesn't support streaming, or
+    any error mid-stream). Never raises.
+    """
+    from tools.summary_display import (
+        emit,
+        release_stream_slot,
+        try_acquire_stream_slot,
+    )
+
+    token = object()
+    if not try_acquire_stream_slot(token):
+        return None
+
+    started = False
+    try:
+        # Parse "Title: ..." / "Source: ..." lines out of context_str for
+        # the display header.
+        url = title = ""
+        for line in (context_str or "").splitlines():
+            if line.startswith("Source: "):
+                url = line[len("Source: "):].strip()
+            elif line.startswith("Title: "):
+                title = line[len("Title: "):].strip()
+
+        from agent.auxiliary_client import _get_task_timeout
+        timeout = _get_task_timeout("web_extract")
+
+        kwargs: Dict[str, Any] = {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": 0.1,
+            "max_tokens": max_tokens,
+            "stream": True,
+        }
+        if timeout:
+            kwargs["timeout"] = timeout
+        if extra_body:
+            kwargs["extra_body"] = extra_body
+
+        stream = await aux_client.chat.completions.create(**kwargs)
+
+        emit("start", url=url, title=title)
+        started = True
+
+        parts: List[str] = []
+        async for chunk in stream:
+            try:
+                delta = chunk.choices[0].delta
+            except (AttributeError, IndexError):
+                continue
+            text = getattr(delta, "content", None)
+            if text:
+                parts.append(text)
+                emit("delta", text=text)
+
+        summary = "".join(parts).strip()
+        emit("end", char_count=len(summary), ok=bool(summary))
+        started = False
+        if summary:
+            return summary
+        # Empty stream (reasoning-only model, provider quirk) — fall back.
+        logger.debug("Streaming summarizer returned empty content; falling back")
+        return None
+    except Exception as e:
+        # Streaming is best-effort: adapters without stream support,
+        # transport errors, etc. all fall back to the robust path.
+        logger.debug("Streaming summarizer failed (%s); falling back to non-streaming", str(e)[:120])
+        if started:
+            emit("end", char_count=0, ok=False)
+        return None
+    finally:
+        release_stream_slot(token)
+
+
 async def _call_summarizer_llm(
     content: str, 
     context_str: str, 
@@ -511,6 +660,11 @@ Important guidelines for chunk processing:
 4. Use bullet points and structured formatting for easy synthesis later
 5. Note any references to other sections (e.g., "as mentioned earlier", "see below") without trying to resolve them
 
+GROUNDING RULES (critical — this summary will be used to answer questions with citations to this source):
+- Keep citable facts as short VERBATIM quotes in "double quotes"; keep numbers, dates, names, and figures EXACTLY as written
+- Use ONLY information from the provided section. Never add outside knowledge, never infer facts the text does not state
+- If the section is ambiguous or silent on something it seems like it should cover, say so explicitly
+
 Your output will be combined with summaries of other sections, so focus on thorough extraction rather than narrative flow."""
 
         user_prompt = f"""Extract key information from this SECTION of a larger document:
@@ -530,6 +684,12 @@ Create a well-structured markdown summary that includes:
 1. Key excerpts (quotes, code snippets, important facts) in their original format
 2. Comprehensive summary of all other important information
 3. Proper markdown formatting with headers, bullets, and emphasis
+
+GROUNDING RULES (critical — this summary will be used to answer questions with citations to this page):
+- Preserve citable facts as short VERBATIM quotes in "double quotes"; keep all numbers, dates, names, versions, and figures EXACTLY as the page states them
+- Use ONLY information present on the page. Never blend in outside knowledge, never fill gaps with plausible-sounding details
+- If the page does NOT cover something a reader would expect, note that explicitly (e.g. "The page does not mention pricing")
+- Attribute claims the page itself attributes (e.g. 'the author claims...', 'according to the cited study...') rather than stating them as bare fact
 
 Your goal is to preserve ALL important information while reducing length. Never lose key facts, figures, insights, or actionable information. Make it scannable and well-organized."""
 
@@ -552,6 +712,22 @@ Create a markdown summary that captures all key information in a well-organized,
             if aux_client is None or not effective_model:
                 logger.warning("No auxiliary model available for web content processing")
                 return None
+
+            # ── Live-display streaming fast path ──────────────────────
+            # When a front-end (CLI) registered a summary display callback
+            # and no other summarization stream owns the display slot, run
+            # the call in streaming mode and mirror tokens to the UI.
+            # Any failure falls through to the standard non-streaming path
+            # with its full retry/fallback machinery.
+            if attempt == 0 and not is_chunk:
+                streamed = await _try_stream_summarizer(
+                    aux_client, effective_model, extra_body,
+                    system_prompt, user_prompt, max_tokens,
+                    context_str=context_str,
+                )
+                if streamed:
+                    return streamed
+
             call_kwargs = {
                 "task": "web_extract",
                 "model": effective_model,
@@ -1004,6 +1180,19 @@ def web_search_tool(query: str, limit: int = 5) -> str:
             )
             response_data = provider.search(query, limit)
 
+        # ── Grounding annotations ──────────────────────────────────────
+        # Tag each result with its stable citation id and attach citation
+        # guidance so the model grounds its answer Perplexity-style.
+        try:
+            web_results = response_data.get("data", {}).get("web", []) if isinstance(response_data, dict) else []
+            for r in web_results:
+                if isinstance(r, dict) and r.get("url"):
+                    r["source"] = f"[{get_source_id(r['url'])}]"
+            if web_results and isinstance(response_data, dict):
+                response_data["citation_guidance"] = CITATION_GUIDANCE
+        except Exception:
+            logger.debug("Failed to annotate search results with source ids", exc_info=True)
+
         debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
         result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
         debug_call_data["final_response_size"] = len(result_json)
@@ -1282,13 +1471,16 @@ async def web_extract_tool(
             {
                 "url": r.get("url", ""),
                 "title": r.get("title", ""),
+                "source": f"[{get_source_id(r['url'])}]" if r.get("url") else "",
                 "content": r.get("content", ""),
                 "error": r.get("error"),
                 **({  "blocked_by_policy": r["blocked_by_policy"]} if "blocked_by_policy" in r else {}),
             }
             for r in response.get("results", [])
         ]
-        trimmed_response = {"results": trimmed_results}
+        trimmed_response: Dict[str, Any] = {"results": trimmed_results}
+        if any(r.get("content") for r in trimmed_results):
+            trimmed_response["citation_guidance"] = CITATION_GUIDANCE
         if _free_parallel_extract:
             # Credit Parallel's free Search MCP (drives the "[Parallel]" UI tag
             # + lets the model cite the source). Free tier only.
@@ -1508,7 +1700,7 @@ from tools.registry import registry, tool_error
 
 WEB_SEARCH_SCHEMA = {
     "name": "web_search",
-    "description": "Search the web for information. Returns up to 5 results by default with titles, URLs, and descriptions. The query is passed through to the configured backend, so operators such as site:domain, filetype:pdf, intitle:word, -term, and \"exact phrase\" may work when the backend supports them.",
+    "description": "Search the web for information. Returns up to 5 results by default with titles, URLs, and descriptions. Each result carries a stable citation id in its 'source' field (e.g. \"[3]\"); when your answer uses a result, cite it inline by appending the id(s) after the supported sentence and finish with a 'Sources:' list mapping cited ids to URLs. The query is passed through to the configured backend, so operators such as site:domain, filetype:pdf, intitle:word, -term, and \"exact phrase\" may work when the backend supports them.",
     "parameters": {
         "type": "object",
         "properties": {
@@ -1530,7 +1722,7 @@ WEB_SEARCH_SCHEMA = {
 
 WEB_EXTRACT_SCHEMA = {
     "name": "web_extract",
-    "description": "Extract content from web page URLs. Returns page content in markdown format. Also works with PDF URLs (arxiv papers, documents, etc.) — pass the PDF link directly and it converts to markdown text. Pages under 5000 chars return full markdown; larger pages are LLM-summarized and capped at ~5000 chars per page. Pages over 2M chars are refused. If a URL fails or times out, use the browser tool to access it instead.",
+    "description": "Extract content from web page URLs. Returns page content in markdown format. Each result carries a stable citation id in its 'source' field (e.g. \"[3]\"); cite it inline after sentences your answer grounds on that page and finish with a 'Sources:' list mapping cited ids to URLs. Also works with PDF URLs (arxiv papers, documents, etc.) — pass the PDF link directly and it converts to markdown text. Pages under 5000 chars return full markdown; larger pages are LLM-summarized and capped at ~5000 chars per page. Pages over 2M chars are refused. If a URL fails or times out, use the browser tool to access it instead.",
     "parameters": {
         "type": "object",
         "properties": {
