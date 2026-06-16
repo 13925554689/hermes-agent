@@ -136,34 +136,19 @@ jobs:
         shell: pwsh
         run: |
           # Install fresh when the cache missed.
-          winget install -e --id AutoHotkey.AutoHotkey --silent --accept-source-agreements --accept-package-agreements --disable-interactivity
-          winget install -e --id Gyan.FFmpeg --silent --accept-source-agreements --accept-package-agreements --disable-interactivity
 
           New-Item -ItemType Directory -Path test-bins\autohotkey, test-bins\ffmpeg -Force | Out-Null
 
           # AutoHotkey: copy its whole v2 directory so helper exes/dlls come along.
+          winget install -e --id AutoHotkey.AutoHotkey --silent --accept-source-agreements --accept-package-agreements --disable-interactivity
           $ahkDir = "$env:ProgramW6432\AutoHotkey\v2"
           if (-not (Test-Path $ahkDir)) {
             throw "AutoHotkey install directory not found: $ahkDir"
           }
           Copy-Item -Path "$ahkDir\*" -Destination test-bins\autohotkey -Recurse -Force
 
-          # ffmpeg: WinGet drops symlinks in its Links dir; resolve the real bin dir and copy everything.
-          $ffmpegLink = "$env:LOCALAPPDATA\Microsoft\WinGet\Links\ffmpeg.exe"
-          if (-not (Test-Path $ffmpegLink)) {
-            throw "ffmpeg symlink not found after winget install: $ffmpegLink"
-          }
-          $ffmpegItem = Get-Item $ffmpegLink
-          $ffmpegReal = if ($ffmpegItem.Attributes -band [System.IO.FileAttributes]::ReparsePoint) {
-            $ffmpegItem.Target[0]
-          } else {
-            $ffmpegLink
-          }
-          if (-not $ffmpegReal -or -not (Test-Path $ffmpegReal)) {
-            throw "Could not resolve ffmpeg symlink target"
-          }
-          $ffmpegDir = Split-Path $ffmpegReal
-          Copy-Item -Path "$ffmpegDir\*" -Destination test-bins\ffmpeg -Recurse -Force
+          # ffmpeg : just install into dir
+          winget install -e --id Gyan.FFmpeg --silent --accept-source-agreements --accept-package-agreements --disable-interactivity --location test-bins\ffmpeg
 
       - name: Add test-bins to PATH
         shell: pwsh
