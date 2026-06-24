@@ -21,10 +21,13 @@ const renderBillingError = (
   sys: Sys,
   ctx: SlashRunCtx,
   env: {
+    actor?: string
+    code?: string
     error?: string
     message?: string
     payload?: BillingErrorPayload
     portal_url?: string | null
+    recovery?: string
     retry_after?: number | null
   }
 ): void => {
@@ -36,16 +39,48 @@ const renderBillingError = (
 
       return
 
+    case 'remote_spending_revoked': {
+      // CF-4: this terminal's spend was revoked. Kill the spend UI NOW (don't
+      // wait for the token refresh ~15 min away) and tell the user who did it.
+      patchOverlayState({ billing: null })
+      const who = env.actor === 'admin'
+        ? 'An admin stopped this terminal’s spending.'
+        : 'You stopped this terminal’s spending.'
+      sys(`🔴 ${who} Reconnect to restore — run /portal to re-authorize this terminal.`)
+
+      return
+    }
+
+    case 'session_revoked':
+      // Stronger than a spend-revoke: the whole session is gone → full re-login.
+      patchOverlayState({ billing: null })
+      sys('🔴 Your session was logged out. Run /portal to log in again.')
+
+      return
+
+    case 'cli_billing_disabled':
+    case 'remote_spending_disabled':
+      // Account-wide switch is OFF (dual-emitted error/code). An admin must flip
+      // it on the portal; this is NOT a per-terminal revoke.
+      sys('🔴 Remote Spending is off for this account — an admin must enable it on the portal.')
+
+      break
+
+    case 'role_required':
+      sys('🔴 Buying credits needs an org admin/owner. Ask an admin, or manage on the portal.')
+
+      break
+
+    case 'idempotency_conflict':
+      sys('🔴 That charge key was already used for a different amount. Start a fresh top-up.')
+
+      break
+
     case 'no_payment_method':
       sys(
         '💳 No saved card for terminal charges yet. Set one up on the portal ' +
           "(one-time credit buys don't save a reusable card)."
       )
-
-      break
-
-    case 'cli_billing_disabled':
-      sys('🔴 Terminal billing is turned off for this org — an admin must enable it on the portal.')
 
       break
 
@@ -56,7 +91,10 @@ const renderBillingError = (
 
       break
     }
-    case 'rate_limited': {
+    case 'rate_limited':
+    case 'temporarily_unavailable': {
+      // 429 throttle OR 503 gate-fail-closed: NOT a payment failure, NOT a
+      // revoke. Back off and tell the user to retry.
       const mins = env.retry_after ? ` (try again in ~${Math.max(1, Math.round(env.retry_after / 60))} min)` : ''
       sys(`🟡 Too many charges right now${mins}. This isn't a payment failure.`)
 
@@ -147,9 +185,19 @@ const pollCharge = (sys: Sys, ctx: SlashRunCtx, chargeId: string, portalUrl?: st
         ctx.guarded<BillingChargeStatusResponse>(r => {
           if (!r.ok) {
             // 429/503 while polling = retry-after, NOT a failure. Back off + continue.
-            if (r.error === 'rate_limited') {
+            if (r.error === 'rate_limited' || r.error === 'temporarily_unavailable') {
               const wait = (r.retry_after ?? 5) * 1000
               setTimeout(tick, Math.min(wait, 30000))
+
+              return
+            }
+
+            // CF-7 rule 4: a post-revoke 403 (or session loss) while polling means
+            // the prior charge's outcome is AMBIGUOUS — it may have settled. Do not
+            // call it failed; surface the revoke + tell the user to verify balance.
+            if (r.error === 'remote_spending_revoked' || r.error === 'session_revoked') {
+              renderBillingError(sys, ctx, r)
+              sys('🟡 Your last charge’s outcome is unconfirmed — check your balance/history before retrying.')
 
               return
             }

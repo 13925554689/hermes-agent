@@ -246,6 +246,77 @@ describe('/billing slash command (overlay-driven)', () => {
     expect(stepUp?.title).toBe('Grant terminal billing access?')
   })
 
+  // ── CF-4: revoked-terminal UX (kill the "15-minute zombie button") ──
+
+  it('ctx.charge remote_spending_revoked (admin) → clears overlay + admin copy', async () => {
+    const { run, sys } = buildCtx({
+      'billing.state': ownerState(),
+      'billing.charge': { ok: false, error: 'remote_spending_revoked', actor: 'admin', recovery: 'reconnect', idempotency_key: 'k' }
+    })
+
+    await run('')
+    expect(getOverlayState().billing).toBeTruthy()
+    getOverlayState().billing!.ctx.charge('100')
+    await Promise.resolve()
+    await Promise.resolve()
+    const out = printed(sys)
+    expect(out).toContain('An admin stopped this terminal')
+    expect(out).toContain('Reconnect to restore')
+    // Spend UI is killed immediately — no zombie button waiting for refresh.
+    expect(getOverlayState().billing).toBeNull()
+  })
+
+  it('ctx.charge remote_spending_revoked (self) → self copy', async () => {
+    const { run, sys } = buildCtx({
+      'billing.state': ownerState(),
+      'billing.charge': { ok: false, error: 'remote_spending_revoked', actor: 'self', recovery: 'reconnect', idempotency_key: 'k' }
+    })
+
+    await run('')
+    getOverlayState().billing!.ctx.charge('100')
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(printed(sys)).toContain('You stopped this terminal')
+    expect(getOverlayState().billing).toBeNull()
+  })
+
+  it('ctx.charge session_revoked → clears overlay + re-login (not reconnect) copy', async () => {
+    const { run, sys } = buildCtx({
+      'billing.state': ownerState(),
+      'billing.charge': { ok: false, error: 'session_revoked', recovery: 'login', idempotency_key: 'k' }
+    })
+
+    await run('')
+    getOverlayState().billing!.ctx.charge('100')
+    await Promise.resolve()
+    await Promise.resolve()
+    expect(printed(sys)).toContain('Your session was logged out')
+    expect(getOverlayState().billing).toBeNull()
+  })
+
+  it('ctx.charge cli_billing_disabled / remote_spending_disabled → account-toggle copy', async () => {
+    const { run, sys } = buildCtx({
+      'billing.state': ownerState(),
+      'billing.charge': {
+        ok: false,
+        error: 'cli_billing_disabled',
+        code: 'remote_spending_disabled',
+        recovery: 'enable_account_toggle',
+        portal_url: '/billing',
+        idempotency_key: 'k'
+      }
+    })
+
+    await run('')
+    getOverlayState().billing!.ctx.charge('100')
+    await Promise.resolve()
+    await Promise.resolve()
+    const out = printed(sys)
+    expect(out).toContain('Remote Spending is off for this account')
+    // Account-wide switch is NOT a per-terminal revoke — overlay stays open.
+    expect(getOverlayState().billing).toBeTruthy()
+  })
+
   it('ctx.applyAutoReload(true, …) → billing.auto_reload RPC, resolves true', async () => {
     const { run, calls } = buildCtx({
       'billing.state': ownerState(),

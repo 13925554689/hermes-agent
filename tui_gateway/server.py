@@ -5491,11 +5491,17 @@ def _serialize_billing_error(exc) -> dict:
     """Map a BillingError into the result.error envelope the TUI branches on."""
     from hermes_cli.nous_billing import (
         BillingRateLimited,
+        BillingRemoteSpendingRevoked,
         BillingScopeRequired,
+        BillingSessionRevoked,
     )
 
     kind = "error"
-    if isinstance(exc, BillingScopeRequired):
+    if isinstance(exc, BillingRemoteSpendingRevoked):
+        kind = "remote_spending_revoked"
+    elif isinstance(exc, BillingSessionRevoked):
+        kind = "session_revoked"
+    elif isinstance(exc, BillingScopeRequired):
         kind = "insufficient_scope"
     elif isinstance(exc, BillingRateLimited):
         kind = "rate_limited"
@@ -5508,6 +5514,11 @@ def _serialize_billing_error(exc) -> dict:
         "portal_url": getattr(exc, "portal_url", None),
         "retry_after": getattr(exc, "retry_after", None),
         "payload": getattr(exc, "payload", {}) or {},
+        # Remote-Spending contract extras (threaded so the TUI can render
+        # actor-aware copy + route recovery without re-parsing the message).
+        "actor": getattr(exc, "actor", None),
+        "code": getattr(exc, "code", None),
+        "recovery": getattr(exc, "recovery", None),
     }
 
 
@@ -5598,7 +5609,6 @@ def _serialize_subscription_state(state) -> dict:
             "cycle_ends_at": c.cycle_ends_at,
             "pending_downgrade_tier_name": c.pending_downgrade_tier_name,
             "pending_downgrade_at": c.pending_downgrade_at,
-            "is_past_due": c.is_past_due,
             "cancel_at_period_end": c.cancel_at_period_end,
             "cancellation_effective_at": c.cancellation_effective_at,
         }

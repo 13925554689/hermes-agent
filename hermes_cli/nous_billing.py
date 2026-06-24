@@ -67,6 +67,9 @@ class BillingError(Exception):
         portal_url: Optional[str] = None,
         retry_after: Optional[int] = None,
         payload: Optional[dict[str, Any]] = None,
+        actor: Optional[str] = None,
+        code: Optional[str] = None,
+        recovery: Optional[str] = None,
     ) -> None:
         super().__init__(message)
         self.status = status
@@ -74,6 +77,13 @@ class BillingError(Exception):
         self.portal_url = portal_url
         self.retry_after = retry_after
         self.payload = payload or {}
+        # Remote-Spending contract extras (NAS PR #481): `actor` (self|admin) on a
+        # revoke, `code` (the new machine code dual-emitted alongside `error`), and
+        # `recovery` (reconnect|login|enable_account_toggle). Additive — absent on
+        # older NAS / unrelated errors.
+        self.actor = actor
+        self.code = code
+        self.recovery = recovery
 
 
 class BillingScopeRequired(BillingError):
@@ -86,17 +96,40 @@ class BillingScopeRequired(BillingError):
     """
 
 
+class BillingAuthError(BillingError):
+    """``401`` — missing/invalid bearer token (not logged in / expired)."""
+
+
+class BillingRemoteSpendingRevoked(BillingError):
+    """``403 remote_spending_revoked`` — THIS terminal's spending was revoked.
+
+    Distinct from ``insufficient_scope`` (never had the grant) and from
+    ``session_revoked`` (full logout). The terminal stays logged in; only the
+    money path is cut. ``actor`` is ``"admin"`` or ``"self"`` (absent → treat as
+    ``"self"``); recovery is **reconnect** (re-consent device-auth). The terminal
+    MUST disable charge/auto-reload immediately, without waiting for the next
+    token refresh (the current token still claims the scope for ~15 min).
+    """
+
+
+class BillingSessionRevoked(BillingAuthError):
+    """``401 session_revoked`` — the whole session was logged out.
+
+    Stronger than a spend-revoke: recovery is **re-login** (full device-auth),
+    not just reconnect. Subclass of :class:`BillingAuthError` so existing 401
+    handling still treats it as not-logged-in, but the typed code lets the
+    surface route to re-login with the right copy.
+    """
+
+
 class BillingRateLimited(BillingError):
     """``429 rate_limited`` or ``503 temporarily_unavailable``.
 
     NOT a payment failure. Carries ``retry_after`` (seconds) — back off and tell
     the user "try again in N min"; never auto-retry-spam (the limiter is
-    5/org/hr + 5/token/hr and easy to dig deeper into).
+    5/org/hr + 5/token/hr and easy to dig deeper into). A 503 is the gate backend
+    failing closed — back off, do NOT treat as revoked.
     """
-
-
-class BillingAuthError(BillingError):
-    """``401`` — missing/invalid bearer token (not logged in / expired)."""
 
 
 # =============================================================================
@@ -234,9 +267,21 @@ def _retry_after_seconds(headers: Any) -> Optional[int]:
 def _raise_for_error(
     status: int, payload: dict[str, Any], headers: Any = None
 ) -> None:
-    """Map an HTTP error response to the right typed :class:`BillingError`."""
+    """Map an HTTP error response to the right typed :class:`BillingError`.
+
+    Recognizes the Remote-Spending gate contract (NAS PR #481):
+    403 ``remote_spending_revoked`` (this terminal's spend revoked → reconnect),
+    401 ``session_revoked`` (full logout → re-login), 503 ``temporarily_unavailable``
+    (gate fail-closed → back off, NOT revoked). The business-denial codes
+    (``cli_billing_disabled`` + dual ``code:remote_spending_disabled``,
+    ``role_required``, ``idempotency_conflict``, …) flow through as a generic
+    BillingError carrying ``error``/``code``/``recovery`` for the surface to map.
+    """
     error = payload.get("error") if isinstance(payload, dict) else None
     message = payload.get("message") if isinstance(payload, dict) else None
+    code = payload.get("code") if isinstance(payload, dict) else None
+    actor = payload.get("actor") if isinstance(payload, dict) else None
+    recovery = payload.get("recovery") if isinstance(payload, dict) else None
     portal_url = _absolutize_portal_url(
         payload.get("portalUrl") if isinstance(payload, dict) else None
     )
@@ -248,14 +293,33 @@ def _raise_for_error(
         "portal_url": portal_url,
         "retry_after": retry_after,
         "payload": payload if isinstance(payload, dict) else None,
+        "actor": actor,
+        "code": code,
+        "recovery": recovery,
     }
 
     if status == 401:
+        # session_revoked is a full logout (→ re-login), stronger than a 401
+        # expired-token. Both stay BillingAuthError-compatible for legacy callers.
+        if error == "session_revoked":
+            raise BillingSessionRevoked(
+                message or "Your session was logged out — log in again.", **common
+            )
         raise BillingAuthError(message or "Authentication required.", **common)
-    if status == 403 and error == "insufficient_scope":
-        raise BillingScopeRequired(
-            message or "This action needs the billing:manage scope.", **common
-        )
+    if status == 403:
+        # This terminal's spending was revoked (NOT the same as never having the
+        # scope). Disable spend UI immediately; recovery is reconnect.
+        if error == "remote_spending_revoked":
+            raise BillingRemoteSpendingRevoked(
+                message or "Remote Spending was revoked for this terminal.", **common
+            )
+        if error == "insufficient_scope":
+            raise BillingScopeRequired(
+                message or "This action needs the billing:manage scope.", **common
+            )
+        # Business 403s (cli_billing_disabled / role_required / no_payment_method /
+        # monthly_cap_exceeded / …) → generic BillingError with code/recovery.
+        raise BillingError(message or error or "Billing request denied.", **common)
     if status in (429, 503):
         raise BillingRateLimited(
             message or "Rate limited — try again shortly.", **common

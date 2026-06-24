@@ -109,13 +109,16 @@ export interface BillingErrorPayload {
 }
 
 export interface BillingChargeResponse {
+  actor?: string
   charge_id?: string
+  code?: string
   error?: string
   idempotency_key?: string
   message?: string
   ok: boolean
   payload?: BillingErrorPayload
   portal_url?: string | null
+  recovery?: string
   retry_after?: number | null
 }
 
@@ -133,12 +136,15 @@ export interface BillingChargeStatusResponse {
 }
 
 export interface BillingMutationResponse {
+  actor?: string
+  code?: string
   error?: string
   granted?: boolean
   message?: string
   ok: boolean
   payload?: BillingErrorPayload
   portal_url?: string | null
+  recovery?: string
   retry_after?: number | null
 }
 
@@ -169,7 +175,6 @@ export interface SubscriptionStateResponse {
     cycle_ends_at: string | null  // ISO
     pending_downgrade_tier_name: string | null
     pending_downgrade_at: string | null
-    is_past_due: boolean          // dunning: active=false but period live (WS1 M1 footgun)
     cancel_at_period_end: boolean // subscription scheduled to cancel at period end
     cancellation_effective_at: string | null  // ISO when cancellation takes effect
   } | null
