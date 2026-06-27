@@ -673,9 +673,16 @@ class LocalEnvironment(BaseEnvironment):
         if not cwd:
             return cwd
         # Only convert when we're actually using WSL bash (not Git Bash)
-        if not _is_wsl_bash(_find_bash()):
+        bash_path = _find_bash()
+        is_wsl = _is_wsl_bash(bash_path)
+        import logging
+        _dbg = logging.getLogger(__name__)
+        _dbg.warning("_cwd_for_shell: cwd=%r bash=%r is_wsl=%r", cwd, bash_path, is_wsl)
+        if not is_wsl:
             return cwd
-        return _windows_to_wsl_path(cwd)
+        result = _windows_to_wsl_path(cwd)
+        _dbg.warning("_cwd_for_shell: converted %r -> %r", cwd, result)
+        return result
 
     def get_temp_dir(self) -> str:
         """Return a shell-safe writable temp dir for local execution.
