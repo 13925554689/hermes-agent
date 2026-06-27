@@ -235,7 +235,7 @@ def _inject_context_hermes_home(env: dict) -> None:
         if value:
             env["HERMES_HOME"] = value
     except Exception:
-        pass
+        logger.debug("suppressed", exc_info=True)
 
 
 def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = None) -> dict:
@@ -564,7 +564,7 @@ def _make_run_env(env: dict) -> dict:
             if value is not _UNSET and value:
                 run_env[var_name] = value
     except Exception:
-        pass
+        logger.debug("suppressed", exc_info=True)
 
     return run_env
 
@@ -829,14 +829,14 @@ class LocalEnvironment(BaseEnvironment):
                 try:
                     proc.poll()
                 except Exception:
-                    pass
+                    logger.debug("suppressed", exc_info=True)
                 if not _group_alive(pgid):
                     return True
                 time.sleep(0.05)
             try:
                 proc.poll()
             except Exception:
-                pass
+                logger.debug("suppressed", exc_info=True)
             return not _group_alive(pgid)
 
         try:
@@ -875,7 +875,7 @@ class LocalEnvironment(BaseEnvironment):
             try:
                 proc.kill()
             except Exception:
-                pass
+                logger.debug("suppressed", exc_info=True)
 
     def _update_cwd(self, result: dict):
         """Read CWD from temp file (local-only, no round-trip needed).

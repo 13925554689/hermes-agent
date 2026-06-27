@@ -76,7 +76,7 @@ def touch_activity_if_due(
             elapsed = int(now - state["start"])
             cb(f"{label} ({elapsed}s elapsed)")
     except Exception:
-        pass
+        logger.debug("suppressed in cleanup", exc_info=True)
 
 
 def get_sandbox_dir() -> Path:
@@ -162,7 +162,7 @@ def _load_json_store(path: Path) -> dict:
         try:
             return json.loads(path.read_text(encoding="utf-8"))
         except Exception:
-            pass
+            logger.debug("suppressed in cleanup", exc_info=True)
     return {}
 
 
@@ -266,7 +266,7 @@ class _ThreadedProcessHandle:
             try:
                 self._cancel_fn()
             except Exception:
-                pass
+                logger.debug("suppressed in cleanup", exc_info=True)
 
     def wait(self, timeout: float | None = None) -> int:
         self._done.wait(timeout=timeout)
@@ -609,14 +609,14 @@ class BaseEnvironment(ABC):
                     else:
                         output_chunks.append(str(piece))
             except Exception:
-                pass
+                logger.debug("suppressed in cleanup", exc_info=True)
             finally:
                 try:
                     tail = decoder.decode(b"", final=True)
                     if tail:
                         output_chunks.append(tail)
                 except Exception:
-                    pass
+                    logger.debug("suppressed in cleanup", exc_info=True)
 
         def _drain():
             # Resolve a real OS file descriptor up front.  Real subprocesses and
@@ -654,7 +654,7 @@ class BaseEnvironment(ABC):
                         if tail:
                             output_chunks.append(tail)
                     except Exception:
-                        pass
+                        logger.debug("suppressed in cleanup", exc_info=True)
                 return
             idle_after_exit = 0
             try:
@@ -688,7 +688,7 @@ class BaseEnvironment(ABC):
                     if tail:
                         output_chunks.append(tail)
                 except Exception:
-                    pass
+                    logger.debug("suppressed in cleanup", exc_info=True)
 
         drain_thread = threading.Thread(target=_drain, daemon=True)
         drain_thread.start()
@@ -803,7 +803,7 @@ class BaseEnvironment(ABC):
                 self._kill_process(proc)
                 drain_thread.join(timeout=2)
             except Exception:
-                pass  # cleanup is best-effort
+                logger.debug("suppressed in cleanup", exc_info=True)  # cleanup is best-effort
             raise
 
         # Drain thread now exits promptly after bash does (~300ms idle
@@ -814,7 +814,7 @@ class BaseEnvironment(ABC):
         try:
             proc.stdout.close()
         except Exception:
-            pass
+            logger.debug("suppressed in cleanup", exc_info=True)
 
         if _DEBUG_INTERRUPT:
             logger.info(
@@ -954,7 +954,7 @@ class BaseEnvironment(ABC):
         try:
             self.cleanup()
         except Exception:
-            pass
+            logger.debug("suppressed in cleanup", exc_info=True)
 
     def _prepare_command(self, command: str) -> tuple[str, str | None]:
         """Transform sudo commands if SUDO_PASSWORD is available."""
