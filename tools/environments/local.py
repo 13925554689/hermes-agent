@@ -12,6 +12,7 @@ import tempfile
 import time
 from pathlib import Path
 
+from tools.environments._path_compat import windows_to_wsl, msys_to_windows, is_wsl_bash, is_wsl
 from tools.environments.base import BaseEnvironment, _pipe_stdin
 from hermes_cli._subprocess_compat import windows_hide_flags
 

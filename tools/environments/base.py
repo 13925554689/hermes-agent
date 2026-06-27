@@ -460,12 +460,7 @@ class BaseEnvironment(ABC):
         def _to_wsl(p: str) -> str:
             if not self._is_wsl():
                 return p
-            _m = _re.match(r'^([a-zA-Z]):[\\\\/]?(.*)$', p)
-            if not _m:
-                return p
-            _drv = _m.group(1).lower()
-            _rest = _m.group(2).replace('\\\\', '/')
-            return "/mnt/" + _drv + "/" + _rest if _rest else "/mnt/" + _drv
+            return windows_to_wsl(p)
 
         _snap_path = _to_wsl(self._snapshot_path)
         _cwd_fpath = _to_wsl(self._cwd_file)
