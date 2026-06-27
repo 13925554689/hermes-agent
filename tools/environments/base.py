@@ -383,6 +383,7 @@ class BaseEnvironment(ABC):
         # produces "No such file or directory" inside the WSL Linux VM.
         _snap_path_for_init = self._snapshot_path
         _cwd_fpath_for_init = self._cwd_file
+        import platform as _plat
         if _plat.system() == "Windows":
             _m_snap = _re.match(r'^([a-zA-Z]):[\\\\/]?(.*)$', _snap_path_for_init)
             if _m_snap:
@@ -455,7 +456,6 @@ class BaseEnvironment(ABC):
         # WSL bash path conversion helper — also converts snapshot/cwd file paths
         # so they're reachable inside the WSL Linux VM (where Windows paths
         # like C:/Users/... aren't valid).  Idempotent on already-WSL paths.
-        import platform as _plat
         import re as _re
         def _to_wsl(p: str) -> str:
             if not self._is_wsl():
@@ -862,7 +862,7 @@ class BaseEnvironment(ABC):
 
         cwd_path = output[first + len(marker) : last].strip()
         if cwd_path:
-            self.cwd = cwd_path
+            self.cwd = cwd_path if cwd_path and os.path.isdir(cwd_path) else self.cwd
 
         # Strip the marker line AND the \n we injected before it.
         # The wrapper emits: printf '\n__MARKER__%s__MARKER__\n'

@@ -2578,7 +2578,18 @@ def terminal_tool(
                         }, ensure_ascii=False)
                     
                     # Retry on transient errors
-                    if retry_count < max_retries:
+                    # Only retry on transient errors (network, timeout)
+                    # Don't retry deterministic failures (PermissionError, FileNotFoundError)
+                    _error_str = str(e)
+                    _is_transient = not any(
+                        kw in _error_str for kw in (
+                            'PermissionError', 'FileNotFoundError', 'FileExistsError',
+                            'NotADirectoryError', 'IsADirectoryError', 'invalid syntax',
+                            'command not found', 'No such file'
+                        )
+                    ) and ('timeout' not in _error_str.lower())
+                    
+                    if retry_count < max_retries and _is_transient:
                         retry_count += 1
                         wait_time = 2 ** retry_count
                         logger.warning("Execution error, retrying in %ds (attempt %d/%d) - Command: %s - Error: %s: %s - Task: %s, Backend: %s",

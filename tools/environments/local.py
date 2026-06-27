@@ -268,8 +268,13 @@ def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = Non
     return sanitized
 
 
+_FIND_BASH_CACHE = None
+
 def _find_bash() -> str:
-    """Find bash for command execution."""
+    """Find bash for command execution. Result cached per process."""
+    global _FIND_BASH_CACHE
+    if _FIND_BASH_CACHE is not None:
+        return _FIND_BASH_CACHE
     if not _IS_WINDOWS:
         return (
             shutil.which("bash")
