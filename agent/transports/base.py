@@ -13,6 +13,39 @@ from typing import Any, Dict, List, Optional
 from agent.transports.types import NormalizedResponse
 
 
+class TransportBase(ABC):
+    """Shared lifecycle interface for all provider transports.
+
+    Each transport implementation manages its own lifecycle through
+    these five operations. Default implementations are no-ops so
+    existing transports continue to work unchanged.
+
+    Lifecycle: connect() → stream() → disconnect()
+                       → health_check() (any time)
+                       → cleanup() (release all resources)
+    """
+
+    def connect(self, **kwargs) -> bool:
+        """Establish transport connection. Default: no-op, returns True."""
+        return True
+
+    async def stream(self, messages, tools=None, **kwargs):
+        """Stream responses from provider. Default: empty stream."""
+        return
+        yield  # pragma: no cover
+
+    def disconnect(self) -> bool:
+        """Tear down connection. Default: no-op, returns True."""
+        return True
+
+    def health_check(self) -> dict:
+        """Check transport health. Returns {"healthy": bool, ...}."""
+        return {"healthy": True}
+
+    def cleanup(self) -> None:
+        """Release all resources. Idempotent. Default: no-op."""
+        pass
+
 class ProviderTransport(ABC):
     """Base class for provider-specific format conversion and normalization."""
 

@@ -6,11 +6,11 @@ This transport owns format conversion and normalization — NOT client lifecycle
 
 from typing import Any, Dict, List, Optional
 
-from agent.transports.base import ProviderTransport
+from agent.transports.base import ProviderTransport, TransportBase
 from agent.transports.types import NormalizedResponse
 
 
-class AnthropicTransport(ProviderTransport):
+class AnthropicTransport(ProviderTransport, TransportBase):
     """Transport for api_mode='anthropic_messages'.
 
     Wraps the existing functions in anthropic_adapter.py behind the

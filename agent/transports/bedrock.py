@@ -8,11 +8,11 @@ boto3 calls stay on AIAgent.
 
 from typing import Any, Dict, List, Optional
 
-from agent.transports.base import ProviderTransport
+from agent.transports.base import ProviderTransport, TransportBase
 from agent.transports.types import NormalizedResponse, ToolCall, Usage
 
 
-class BedrockTransport(ProviderTransport):
+class BedrockTransport(ProviderTransport, TransportBase):
     """Transport for api_mode='bedrock_converse'."""
 
     @property

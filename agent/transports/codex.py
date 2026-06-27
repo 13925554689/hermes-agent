@@ -9,7 +9,7 @@ import hashlib
 import json
 from typing import Any, Dict, List, Optional
 
-from agent.transports.base import ProviderTransport
+from agent.transports.base import ProviderTransport, TransportBase
 from agent.transports.types import NormalizedResponse, ToolCall
 
 
@@ -46,7 +46,7 @@ def _content_cache_key(instructions: str, tools: Optional[List[Dict[str, Any]]])
     return f"pck_{digest}"
 
 
-class ResponsesApiTransport(ProviderTransport):
+class ResponsesApiTransport(ProviderTransport, TransportBase):
     """Transport for api_mode='codex_responses'.
 
     Wraps the functions extracted into codex_responses_adapter.py (PR 1).
