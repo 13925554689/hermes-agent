@@ -361,16 +361,41 @@ class BaseEnvironment(ABC):
         # Restore configured cwd after login shell profile scripts, which may
         # change the working directory (e.g. bashrc `cd ~`).  Without this,
         # pwd -P captures the profile's directory, not terminal.cwd.
-        _quoted_cwd = shlex.quote(self._cwd_for_shell(self.cwd))
+        _quoted_shell_cwd = self._cwd_for_shell(self.cwd)
+        # Hardened WSL check
+        import platform as _plat
+        import re as _re
+        if _plat.system() == "Windows" and _quoted_shell_cwd == self.cwd:
+            _m = _re.match(r'^([a-zA-Z]):[\\/]?(.*)$', self.cwd)
+            if _m:
+                _drv = _m.group(1).lower()
+                _rest = _m.group(2).replace('\\', '/')
+                _quoted_shell_cwd = "/mnt/" + _drv + "/" + _rest if _rest else "/mnt/" + _drv
+        _quoted_cwd = shlex.quote(_quoted_shell_cwd)
         # Quote the snapshot / cwd-file paths so Git Bash on Windows handles
         # ``C:/Users/...``-shaped paths without glob-splitting the colon or
         # tripping on drive letters.  On POSIX this is a no-op (no colons /
         # special chars in a /tmp path).  Previously unquoted interpolation
         # caused ``C:/Users/.../hermes-snap-*.sh: No such file or directory``
         # errors on Windows, leaking via stderr (merged into stdout on Linux
-        # backends) into every terminal-tool response.
-        _quoted_snap = shlex.quote(self._snapshot_path)
-        _quoted_cwd_file = shlex.quote(self._cwd_file)
+        # Convert snapshot/cwd file paths for WSL bash — same pattern
+        # as the cwd conversion above.  Without this, ``source C:/...``
+        # produces "No such file or directory" inside the WSL Linux VM.
+        _snap_path_for_init = self._snapshot_path
+        _cwd_fpath_for_init = self._cwd_file
+        if _plat.system() == "Windows":
+            _m_snap = _re.match(r'^([a-zA-Z]):[\\\\/]?(.*)$', _snap_path_for_init)
+            if _m_snap:
+                _sdrv_init = _m_snap.group(1).lower()
+                _srest_init = _m_snap.group(2).replace('\\\\', '/')
+                _snap_path_for_init = "/mnt/" + _sdrv_init + "/" + _srest_init if _srest_init else "/mnt/" + _sdrv_init
+            _m_cwd_init = _re.match(r'^([a-zA-Z]):[\\\\/]?(.*)$', _cwd_fpath_for_init)
+            if _m_cwd_init:
+                _cdrv_init = _m_cwd_init.group(1).lower()
+                _crest_init = _m_cwd_init.group(2).replace('\\\\', '/')
+                _cwd_fpath_for_init = "/mnt/" + _cdrv_init + "/" + _crest_init if _crest_init else "/mnt/" + _cdrv_init
+        _quoted_snap = shlex.quote(_snap_path_for_init)
+        _quoted_cwd_file = shlex.quote(_cwd_fpath_for_init)
         bootstrap = (
             f"export -p > {_quoted_snap}\n"
             f"declare -f | grep -vE '^_[^_]' >> {_quoted_snap}\n"
@@ -427,14 +452,30 @@ class BaseEnvironment(ABC):
     def _wrap_command(self, command: str, cwd: str) -> str:
         """Build the full bash script that sources snapshot, cd's, runs command,
         re-dumps env vars, and emits CWD markers."""
-        escaped = command.replace("'", "'\\''")
+        # WSL bash path conversion helper — also converts snapshot/cwd file paths
+        # so they're reachable inside the WSL Linux VM (where Windows paths
+        # like C:/Users/... aren't valid).  Idempotent on already-WSL paths.
+        import platform as _plat
+        import re as _re
+        def _to_wsl(p: str) -> str:
+            if _plat.system() != "Windows":
+                return p
+            _m = _re.match(r'^([a-zA-Z]):[\\\\/]?(.*)$', p)
+            if not _m:
+                return p
+            _drv = _m.group(1).lower()
+            _rest = _m.group(2).replace('\\\\', '/')
+            return "/mnt/" + _drv + "/" + _rest if _rest else "/mnt/" + _drv
+
+        _snap_path = _to_wsl(self._snapshot_path)
+        _cwd_fpath = _to_wsl(self._cwd_file)
 
         # Quote the snapshot / cwd-file paths so Git Bash on Windows handles
         # ``C:/Users/...``-shaped paths without glob-splitting the colon or
         # tripping on drive letters.  POSIX paths are unaffected.  See
         # :meth:`init_session` for the same fix on the bootstrap block.
-        _quoted_snap = shlex.quote(self._snapshot_path)
-        _quoted_cwd_file = shlex.quote(self._cwd_file)
+        _quoted_snap = shlex.quote(_snap_path)
+        _quoted_cwd_file = shlex.quote(_cwd_fpath)
 
         parts = []
 
@@ -452,12 +493,28 @@ class BaseEnvironment(ABC):
         # Preserve bare ``~`` expansion, but rewrite ``~/...`` through
         # ``$HOME`` so suffixes with spaces remain a single shell word.
         shell_cwd = self._cwd_for_shell(cwd)
+        # Hardened: also check directly for WSL bash on Windows
+        if _plat.system() == "Windows" and shell_cwd == cwd:
+            _m = _re.match(r'^([a-zA-Z]):[\\\\/]?(.*)$', cwd)
+            if _m:
+                _drv = _m.group(1).lower()
+                _rest = _m.group(2).replace('\\\\', '/')
+                shell_cwd = "/mnt/" + _drv + "/" + _rest if _rest else "/mnt/" + _drv
         quoted_cwd = self._quote_cwd_for_cd(shell_cwd)
         # ``--`` keeps hyphen-prefixed directory names from being parsed as options.
         parts.append(f"builtin cd -- {quoted_cwd} || exit 126")
 
-        # Run the actual command
-        parts.append(f"eval '{escaped}'")
+        # Run the actual command via heredoc (not eval) so single-quoted
+        # Windows paths with backslashes survive into bash without quoting
+        # conflicts.  eval '{escaped}' broke when _atomic_write's
+        # _escape_shell_arg paths contained '\\'' patterns that
+        # interacted with eval's outer single quotes.
+        import uuid as _uuid
+        _delim = f"HERMESEOF_{_uuid.uuid4().hex[:8]}"
+        while _delim in command:
+            _delim = f"HERMESEOF_{_uuid.uuid4().hex[:8]}"
+        parts.append(f"bash << '{_delim}'\n{command}\n{_delim}")
+
         parts.append("__hermes_ec=$?")
 
         # Re-dump env vars to snapshot (last-writer-wins for concurrent calls)
