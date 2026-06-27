@@ -592,14 +592,38 @@ def run_conversation(
     # all run inside Codex). Default Hermes path is bypassed entirely.
     # See agent/transports/codex_app_server_session.py for the adapter
     # and references/codex-app-server-runtime.md for the rationale.
-    if agent.api_mode == "codex_app_server":
-        return agent._run_codex_app_server_turn(
-            user_message=user_message,
-            original_user_message=original_user_message,
-            messages=messages,
-            effective_task_id=effective_task_id,
-            should_review_memory=_should_review_memory,
-        )
+
+    # ── Model Router: task-aware model selection on first turn ─────
+    # Runs once per conversation (when api_call_count == 0 and no
+    # conversation history). Analyzes the user's task and switches to
+    # the best model from the configured pools.
+    _router = getattr(agent, "_model_router", None)
+    if _router is not None and _router.enabled and api_call_count == 0:
+        _history_len = len(conversation_history) if conversation_history else 0
+        if _history_len == 0:
+            try:
+                _selected = _router.route(user_message)
+                if _selected:
+                    _new_provider = _selected.get("provider", "")
+                    _new_model = _selected.get("model", "")
+                    _current_provider = (getattr(agent, "provider", "") or "").strip().lower()
+                    _current_model = (getattr(agent, "model", "") or "").strip().lower()
+                    if (_new_provider and _new_model and
+                        (_new_provider.lower() != _current_provider or
+                         _new_model.lower() != _current_model)):
+                        if not agent.quiet_mode:
+                            print(f"🧠 Router: '{_router.classify(user_message)}' → {_new_provider}/{_new_model}")
+                        try:
+                            agent.switch_model(
+                                new_model=_new_model,
+                                new_provider=_new_provider,
+                                api_key=_selected.get("api_key", ""),
+                                base_url=_selected.get("base_url", ""),
+                            )
+                        except Exception as _sw_err:
+                            logger.warning(f"Model router switch failed: {_sw_err}")
+            except Exception as _rt_err:
+                logger.debug(f"Model router skipped: {_rt_err}")
 
     while (api_call_count < agent.max_iterations and agent.iteration_budget.remaining > 0) or agent._budget_grace_call:
         # Reset per-turn checkpoint dedup so each iteration can take one snapshot

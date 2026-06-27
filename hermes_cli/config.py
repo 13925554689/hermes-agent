@@ -896,6 +896,14 @@ DEFAULT_CONFIG = {
     "model": "",
     "providers": {},
     "fallback_providers": [],
+    "model_router": {
+        "enabled": False,
+        "mode": "rule",
+        "router_provider": "",
+        "router_model": "",
+        "pools": {},
+        "cost_optimize": True,
+    },
     "credential_pool_strategies": {},
     "toolsets": ["hermes-cli"],
     # Global active chat session cap across CLI, TUI/dashboard, and messaging.

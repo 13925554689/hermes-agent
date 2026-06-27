@@ -974,6 +974,19 @@ def init_agent(
         agent._fallback_chain = [fallback_model]
     else:
         agent._fallback_chain = []
+    # ── Model Router: task-aware automatic model selection ─────────
+    agent._model_router = None
+    try:
+        from agent.model_router import ModelRouter
+        _router_cfg = agent._runtime_config.get("model_router", {}) if hasattr(agent, '_runtime_config') else {}
+        if _router_cfg.get("enabled"):
+            agent._model_router = ModelRouter(_router_cfg)
+            if agent._model_router.has_pools and not agent.quiet_mode:
+                cats = agent._model_router.get_all_categories()
+                print(f"🧠 Model Router: {len(cats)} pools ({', '.join(cats)})")
+    except Exception as _e:
+        logger.debug(f"Model router init skipped: {_e}")
+
     agent._fallback_index = 0
     agent._fallback_activated = getattr(agent, "_fallback_activated", False)
     # Legacy attribute kept for backward compat (tests, external callers)
