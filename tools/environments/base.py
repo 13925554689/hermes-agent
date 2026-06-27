@@ -362,10 +362,10 @@ class BaseEnvironment(ABC):
         # change the working directory (e.g. bashrc `cd ~`).  Without this,
         # pwd -P captures the profile's directory, not terminal.cwd.
         _quoted_shell_cwd = self._cwd_for_shell(self.cwd)
-        # Hardened WSL check
-        import platform as _plat
+        # WSL check: only convert paths when running inside actual WSL
+        # (not Git Bash, MSYS2, or other Windows shells)
         import re as _re
-        if _plat.system() == "Windows" and _quoted_shell_cwd == self.cwd:
+        if self._is_wsl() and _quoted_shell_cwd == self.cwd:
             _m = _re.match(r'^([a-zA-Z]):[\\/]?(.*)$', self.cwd)
             if _m:
                 _drv = _m.group(1).lower()
@@ -458,7 +458,7 @@ class BaseEnvironment(ABC):
         import platform as _plat
         import re as _re
         def _to_wsl(p: str) -> str:
-            if _plat.system() != "Windows":
+            if not self._is_wsl():
                 return p
             _m = _re.match(r'^([a-zA-Z]):[\\\\/]?(.*)$', p)
             if not _m:
@@ -493,8 +493,8 @@ class BaseEnvironment(ABC):
         # Preserve bare ``~`` expansion, but rewrite ``~/...`` through
         # ``$HOME`` so suffixes with spaces remain a single shell word.
         shell_cwd = self._cwd_for_shell(cwd)
-        # Hardened: also check directly for WSL bash on Windows
-        if _plat.system() == "Windows" and shell_cwd == cwd:
+        # WSL check: only convert paths when running inside actual WSL
+        if self._is_wsl() and shell_cwd == cwd:
             _m = _re.match(r'^([a-zA-Z]):[\\\\/]?(.*)$', cwd)
             if _m:
                 _drv = _m.group(1).lower()
