@@ -361,7 +361,7 @@ class BaseEnvironment(ABC):
         # Restore configured cwd after login shell profile scripts, which may
         # change the working directory (e.g. bashrc `cd ~`).  Without this,
         # pwd -P captures the profile's directory, not terminal.cwd.
-        _quoted_cwd = shlex.quote(self.cwd)
+        _quoted_cwd = shlex.quote(self._cwd_for_shell(self.cwd))
         # Quote the snapshot / cwd-file paths so Git Bash on Windows handles
         # ``C:/Users/...``-shaped paths without glob-splitting the colon or
         # tripping on drive letters.  On POSIX this is a no-op (no colons /
@@ -416,6 +416,14 @@ class BaseEnvironment(ABC):
             return f"$HOME/{shlex.quote(cwd[2:])}"
         return shlex.quote(cwd)
 
+    def _cwd_for_shell(self, cwd: str) -> str:
+        """Return *cwd* in a form the shell's ``cd`` can resolve.
+
+        Default is identity — backends that need translation (WSL →
+        ``/mnt/<drive>/...``) override this.
+        """
+        return cwd
+
     def _wrap_command(self, command: str, cwd: str) -> str:
         """Build the full bash script that sources snapshot, cd's, runs command,
         re-dumps env vars, and emits CWD markers."""
@@ -443,7 +451,8 @@ class BaseEnvironment(ABC):
 
         # Preserve bare ``~`` expansion, but rewrite ``~/...`` through
         # ``$HOME`` so suffixes with spaces remain a single shell word.
-        quoted_cwd = self._quote_cwd_for_cd(cwd)
+        shell_cwd = self._cwd_for_shell(cwd)
+        quoted_cwd = self._quote_cwd_for_cd(shell_cwd)
         # ``--`` keeps hyphen-prefixed directory names from being parsed as options.
         parts.append(f"builtin cd -- {quoted_cwd} || exit 126")
 

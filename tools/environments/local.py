@@ -40,6 +40,39 @@ def _msys_to_windows_path(cwd: str) -> str:
     return f"{drive}:{tail or chr(92)}"  # chr(92) = backslash, avoid raw-string escape
 
 
+def _windows_to_wsl_path(win_path: str) -> str:
+    """Convert a Windows path (``D:\\DAP``) to WSL form (``/mnt/d/DAP``).
+
+    No-ops on paths that don't look like Windows absolute paths.
+    Idempotent — calling it on an already-WSL path returns it as-is.
+    """
+    import re
+    m = re.match(r'^([a-zA-Z]):[\\/]?(.*)$', win_path)
+    if not m:
+        return win_path
+    drive = m.group(1).lower()
+    rest = m.group(2).replace('\\', '/')
+    return f"/mnt/{drive}/{rest}" if rest else f"/mnt/{drive}"
+
+
+def _is_wsl_bash(bash_path: str) -> bool:
+    """Return True if *bash_path* is the WSL launcher (not Git Bash / MSYS2).
+
+    The WSL bash launcher on Windows 10/11 lives under
+    ``%SystemRoot%\\System32\\bash.exe`` (or SysWOW64).
+    Git Bash installs elsewhere — typically under ``Program Files``,
+    ``%LOCALAPPDATA%\\Programs\\Git``, or Hermes's own portable Git.
+    """
+    if not bash_path:
+        return False
+    system_root = os.environ.get("SystemRoot", "") or r"C:\\Windows"
+    norm_bash = os.path.normpath(bash_path).lower()
+    for subdir in ("system32", "syswow64"):
+        if norm_bash.startswith(os.path.normpath(os.path.join(system_root, subdir)).lower()):
+            return True
+    return False
+
+
 def _resolve_safe_cwd(cwd: str) -> str:
     """Return ``cwd`` if it exists as a directory, else the nearest existing
     ancestor.  Falls back to ``tempfile.gettempdir()`` only if walking up the
@@ -627,6 +660,22 @@ class LocalEnvironment(BaseEnvironment):
             cwd = os.path.expanduser(cwd)
         super().__init__(cwd=cwd or os.getcwd(), timeout=timeout, env=env)
         self.init_session()
+
+    def _cwd_for_shell(self, cwd: str) -> str:
+        """Convert Windows ``D:\\DAP`` to ``/mnt/d/DAP`` when using WSL bash.
+
+        Git Bash / MSYS2 understands Windows paths natively, so the
+        default identity is correct there.  WSL bash runs inside a Linux
+        VM and can only reach Windows drives through ``/mnt/<drive>/``.
+        """
+        if not _IS_WINDOWS:
+            return cwd
+        if not cwd:
+            return cwd
+        # Only convert when we're actually using WSL bash (not Git Bash)
+        if not _is_wsl_bash(_find_bash()):
+            return cwd
+        return _windows_to_wsl_path(cwd)
 
     def get_temp_dir(self) -> str:
         """Return a shell-safe writable temp dir for local execution.
