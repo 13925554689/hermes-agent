@@ -23,6 +23,7 @@ from typing import IO, Callable, Protocol
 from hermes_constants import get_hermes_home
 from hermes_cli._subprocess_compat import windows_hide_flags
 from tools.interrupt import is_interrupted
+from tools.environments._path_compat import windows_to_wsl, is_wsl as _is_wsl_fn
 
 logger = logging.getLogger(__name__)
 
@@ -301,6 +302,14 @@ class BaseEnvironment(ABC):
     # Snapshot creation timeout (override for slow cold-starts).
     _snapshot_timeout: int = 30
 
+    def _is_wsl(self) -> bool:
+        """Return True when the bash we're about to invoke is the WSL launcher.
+
+        This is a per-backend decision — LocalEnvironment checks the bash
+        binary path; remote backends always return False.
+        """
+        return _is_wsl_fn()
+
     def get_temp_dir(self) -> str:
         """Return the backend temp directory used for session artifacts.
 
@@ -499,16 +508,17 @@ class BaseEnvironment(ABC):
         # ``--`` keeps hyphen-prefixed directory names from being parsed as options.
         parts.append(f"builtin cd -- {quoted_cwd} || exit 126")
 
-        # Run the actual command via heredoc (not eval) so single-quoted
-        # Windows paths with backslashes survive into bash without quoting
-        # conflicts.  eval '{escaped}' broke when _atomic_write's
-        # _escape_shell_arg paths contained '\\'' patterns that
-        # interacted with eval's outer single quotes.
+        # Run the actual command via heredoc on fd 3 (not stdin) so
+        # single-quoted Windows paths survive into bash without quoting
+        # conflicts.  Plain heredoc (<<) on fd 0 consumed piped stdin data,
+        # breaking _atomic_write's cat > "$tmp", and eval '{escaped}' broke
+        # when _escape_shell_arg paths contained '\\'' patterns.
+        # Using fd 3 preserves stdin (fd 0) for the inner command.
         import uuid as _uuid
         _delim = f"HERMESEOF_{_uuid.uuid4().hex[:8]}"
         while _delim in command:
             _delim = f"HERMESEOF_{_uuid.uuid4().hex[:8]}"
-        parts.append(f"bash << '{_delim}'\n{command}\n{_delim}")
+        parts.append(f"bash /dev/fd/3 3<< '{_delim}'\n{command}\n{_delim}")
 
         parts.append("__hermes_ec=$?")
 
