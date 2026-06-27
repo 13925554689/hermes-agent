@@ -837,11 +837,56 @@ class ShellFileOperations(FileOperations):
         )
     
     def _has_command(self, cmd: str) -> bool:
-        """Check if a command exists in the environment (cached)."""
+        """Check if a command exists in the environment (cached).
+        
+        On Windows/WSL, also probes common Windows install paths for
+        tools like ripgrep (rg.exe) that winget/scoop/choco install
+        into the Windows PATH but not WSL's PATH.
+        """
         if cmd not in self._command_cache:
             result = self._exec(f"command -v {cmd} >/dev/null 2>&1 && echo 'yes'")
-            self._command_cache[cmd] = result.stdout.strip() == 'yes'
+            if result.stdout.strip() == 'yes':
+                self._command_cache[cmd] = True
+            elif cmd == 'rg' and self._is_windows_wsl():
+                # Probe Windows-side rg.exe via common install paths
+                win_rg_paths = [
+                    '/mnt/c/Users/*/AppData/Local/Microsoft/WinGet/Links/rg.exe',
+                    '/mnt/c/Users/*/scoop/shims/rg.exe',
+                    '/mnt/c/Program Files/Git/usr/bin/rg.exe',
+                ]
+                import glob as _glob
+                for pattern in win_rg_paths:
+                    matches = _glob.glob(pattern)
+                    if matches:
+                        # Found rg.exe — create a wrapper script in WSL
+                        rg_path = matches[0]
+                        wrapper = '#!/bin/bash\n"' + rg_path + '" "$@"'
+                        try:
+                            import subprocess as _sp
+                            _sp.run(
+                                ['bash', '-c', 
+                                 f"mkdir -p ~/.local/bin && printf '%s\\n' '{wrapper}' > ~/.local/bin/rg && chmod +x ~/.local/bin/rg"],
+                                capture_output=True, timeout=5
+                            )
+                            # Verify it works
+                            check = self._exec("command -v rg >/dev/null 2>&1 && echo 'yes'")
+                            self._command_cache[cmd] = check.stdout.strip() == 'yes'
+                        except Exception:
+                            self._command_cache[cmd] = False
+                        break
+                else:
+                    self._command_cache[cmd] = False
+            else:
+                self._command_cache[cmd] = False
         return self._command_cache[cmd]
+    
+    def _is_windows_wsl(self) -> bool:
+        """Detect if running inside WSL on Windows."""
+        try:
+            result = self._exec("uname -r 2>/dev/null")
+            return 'microsoft' in result.stdout.lower() or 'WSL' in result.stdout.upper()
+        except Exception:
+            return False
     
     def _is_likely_binary(self, path: str, content_sample: str = None) -> bool:
         """
@@ -934,6 +979,16 @@ class ShellFileOperations(FileOperations):
         # Use single quotes and escape any single quotes in the string
         return "'" + arg.replace("'", "'\"'\"'") + "'"
 
+    def _is_wsl(self) -> bool:
+        """Detect if running inside WSL."""
+        if not hasattr(self, '_cached_is_wsl'):
+            try:
+                result = self._exec("uname -r 2>/dev/null || echo ''")
+                self._cached_is_wsl = 'microsoft' in (result.stdout or '').lower()
+            except Exception:
+                self._cached_is_wsl = False
+        return self._cached_is_wsl
+
     def _atomic_write(self, path: str, content: str) -> "ExecuteResult":
         """Write ``content`` to ``path`` atomically via temp-file + rename.
 
@@ -986,7 +1041,33 @@ class ShellFileOperations(FileOperations):
             'mv -f "$tmp" "$t"; '
             "trap - EXIT"
         )
-        return self._exec(script, stdin_data=content)
+        # On WSL/Windows, prefer Python-based write to avoid bash
+        # quoting edge cases with special characters in content
+        if self._is_wsl() if hasattr(self, '_is_wsl') else False:
+            import base64 as _b64
+            _encoded = _b64.b64encode(
+                content.encode('utf-8') if isinstance(content, str) else content
+            ).decode('ascii')
+            py_script = (
+                "import base64, os; "
+                f"path = {q_path}; "
+                f"data = base64.b64decode('{_encoded}'); "
+                "os.makedirs(os.path.dirname(path) or '.', exist_ok=True); "
+                "tmp = path + '.hermes-tmp.' + str(os.getpid()); "
+                "with open(tmp, 'wb') as f: f.write(data); "
+                "os.replace(tmp, path); "
+                "print('ok')"
+            )
+            py_result = self._exec(
+                f"python3 -c {self._escape_shell_arg(py_script)} 2>/dev/null || "
+                f"python -c {self._escape_shell_arg(py_script)}"
+            )
+            if py_result.exit_code == 0 and 'ok' in (py_result.stdout or ''):
+                return py_result
+        
+        # Standard shell-based atomic write
+        result = self._exec(script, stdin_data=content)
+        return result
 
     def _detect_file_line_ending(self, path: str, pre_content: Optional[str] = None) -> Optional[str]:
         """Detect the dominant line ending of a file on disk.
