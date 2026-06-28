@@ -285,6 +285,42 @@ def aggregate_moa_context(
     )
 
 
+def _make_moa_error_response(error_message: str) -> Any:
+    """Build a synthetic ChatCompletion-like error response.
+
+    When all aggregator candidates fail, returning this lets the agent
+    loop's normal error-handling path surface the message to the user
+    instead of crashing the process with an unhandled RuntimeError.
+    """
+    import time as _time
+
+    class _Choice:
+        def __init__(self, text: str):
+            self.index = 0
+            self.message = type("_Msg", (), {})()
+            self.message.role = "assistant"
+            self.message.content = text
+            self.message.tool_calls = None
+            self.finish_reason = "error"
+
+    class _Usage:
+        def __init__(self):
+            self.prompt_tokens = 0
+            self.completion_tokens = 0
+            self.total_tokens = 0
+
+    class _Resp:
+        def __init__(self, text: str):
+            self.id = f"moa_err_{int(_time.time())}"
+            self.object = "chat.completion"
+            self.created = int(_time.time())
+            self.model = "moa-error"
+            self.choices = [_Choice(text)]
+            self.usage = _Usage()
+
+    return _Resp(error_message)
+
+
 class MoAChatCompletions:
     """OpenAI-chat-compatible facade where the aggregator is the acting model."""
 
@@ -424,15 +460,15 @@ class MoAChatCompletions:
         # max_tokens is passed through from the caller (normally None → omitted
         # → the model's real maximum). The preset's old hardcoded 4096 default
         # is gone — it truncated long syntheses.
-        #
         # Fallback chain: the aggregator is a single point of failure — if its
         # provider is out of credit, rate-limited, or its OpenAI client got torn
-        # down ("Failed to recreate closed OpenAI client"), a bare call_llm here
-        # raises straight through the MoA layer and crashes the whole turn. So we
-        # try the configured aggregator first, then degrade through the global
-        # fallback_providers chain (skipping the aggregator's own provider, which
-        # already failed). Any provider that answers becomes the acting model for
-        # this turn. Only if every candidate fails do we re-raise the last error.
+        # down, a bare call_llm here raises straight through the MoA layer and
+        # crashes the whole turn.  So we try the configured aggregator first,
+        # then degrade through the global fallback_providers chain (skipping the
+        # aggregator's own provider, which already failed).  Any provider that
+        # answers becomes the acting model for this turn.  Only if every
+        # candidate fails do we return a synthetic error response (not raise —
+        # raising crashes the CLI session).
         def _agg_call(slot: dict[str, Any]) -> Any:
             return call_llm(
                 task="moa_aggregator",
@@ -473,12 +509,6 @@ class MoAChatCompletions:
                         "MoA aggregator fell back to %s (primary %s failed: %s)",
                         _slot_label(_slot), _slot_label(aggregator), last_exc,
                     )
-                    self._emit(
-                        "moa.aggregator_fallback",
-                        primary=_slot_label(aggregator),
-                        fallback=_slot_label(_slot),
-                        error=str(last_exc),
-                    )
                 return _resp
             except Exception as _exc:
                 last_exc = _exc
@@ -487,16 +517,37 @@ class MoAChatCompletions:
                 )
                 continue
 
-        # Every aggregator candidate failed. Re-raise the last error so the agent
-        # loop's own error handling surfaces it (it will not silently crash the
-        # process the way an unguarded teardown error did).
-        raise RuntimeError(
-            "MoA aggregator and all fallback providers failed; "
+        # Every aggregator candidate failed.  Return a synthetic error response
+        # instead of raising — the agent loop's retry/fallback machinery
+        # handles API errors gracefully, but an unhandled RuntimeError from
+        # inside the MoA layer crashes the CLI session.
+        _err_msg = (
+            f"MoA aggregator and all fallback providers failed; "
             f"last error: {last_exc}"
         )
+        logger.error(_err_msg)
+        return _make_moa_error_response(_err_msg)
 
 
 class MoAClient:
+    """OpenAI-client-compatible facade for MoA.
+
+    Exposes close() and is_closed so that the agent's generic client
+    lifecycle paths (_close_openai_client, _is_openai_client_closed,
+    _force_close_tcp_sockets) work without special-casing.  MoAClient
+    holds no TCP sockets itself — the underlying call_llm creates and
+    tears down its own connections per call — so close() is a no-op
+    that just marks the object as closed.
+    """
+
     def __init__(self, preset_name: str, reference_callback: Any = None):
         self.chat = type("_MoAChat", (), {})()
         self.chat.completions = MoAChatCompletions(preset_name, reference_callback=reference_callback)
+        self._closed = False
+
+    @property
+    def is_closed(self) -> bool:
+        return self._closed
+
+    def close(self) -> None:
+        self._closed = True
