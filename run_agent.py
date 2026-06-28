@@ -1367,14 +1367,26 @@ class AIAgent:
         return False
 
     def _is_ollama_glm_backend(self) -> bool:
-        """Detect the narrow backend family affected by Ollama/GLM stop misreports."""
+        """Detect Ollama-hosted GLM models affected by stop misreports.
+
+        Ollama can misreport truncated output as finish_reason='stop'.
+        Detection relies on explicit Ollama signatures:
+        - Port 11434 (Ollama default)
+        - "ollama" in the base URL (e.g. ollama.local, /ollama/ path)
+        - provider explicitly set to "ollama"
+
+        Crucially it does NOT match arbitrary local/private endpoints
+        (LiteLLM/sglang/vLLM/LM Studio proxies, Tailscale boxes), which
+        report finish_reason correctly and were the source of #13971's
+        false-positive truncation continuations.
+        """
         model_lower = (self.model or "").lower()
         provider_lower = (self.provider or "").lower()
         if "glm" not in model_lower and provider_lower != "zai":
             return False
         if "ollama" in self._base_url_lower or ":11434" in self._base_url_lower:
             return True
-        return bool(self.base_url and is_local_endpoint(self.base_url))
+        return provider_lower == "ollama"
 
     def _should_treat_stop_as_truncated(
         self,
@@ -1412,10 +1424,13 @@ class AIAgent:
         user_message: str,
         assistant_content: str,
         messages: List[Dict[str, Any]],
+        require_workspace: bool = True,
     ) -> bool:
         """Forwarder — see ``agent.agent_runtime_helpers.looks_like_codex_intermediate_ack``."""
         from agent.agent_runtime_helpers import looks_like_codex_intermediate_ack
-        return looks_like_codex_intermediate_ack(self, user_message, assistant_content, messages)
+        return looks_like_codex_intermediate_ack(
+            self, user_message, assistant_content, messages, require_workspace
+        )
 
     def _extract_reasoning(self, assistant_message) -> Optional[str]:
         """Forwarder — see ``agent.agent_runtime_helpers.extract_reasoning``."""
@@ -3649,6 +3664,13 @@ class AIAgent:
             )
 
     def _replace_primary_openai_client(self, *, reason: str) -> bool:
+        # MoA provider uses MoAClient, not OpenAI client.  Rebuild from preset.
+        if getattr(self, "provider", "") == "moa":
+            with self._openai_client_lock():
+                old_client = getattr(self, "client", None)
+                self._recreate_moa_client(reason=reason)
+            self._close_openai_client(old_client, reason=f"replace:{reason}", shared=True)
+            return True
         with self._openai_client_lock():
             old_client = getattr(self, "client", None)
             try:
@@ -3671,6 +3693,15 @@ class AIAgent:
             if client is not None and not self._is_openai_client_closed(client):
                 return client
 
+        # MoA provider uses MoAClient (not OpenAI client).  When it gets
+        # torn down to None (cache eviction, close, transport recovery),
+        # _replace_primary_openai_client would try OpenAI(**{}) -> crash.
+        # Recreate MoAClient directly from the preset name instead.
+        if getattr(self, "provider", "") == "moa":
+            self._recreate_moa_client(reason=reason)
+            with self._openai_client_lock():
+                return self.client
+
         logger.warning(
             "Detected closed shared OpenAI client; recreating before use (%s) %s",
             reason,
@@ -3680,6 +3711,28 @@ class AIAgent:
             raise RuntimeError("Failed to recreate closed OpenAI client")
         with self._openai_client_lock():
             return self.client
+
+    def _recreate_moa_client(self, *, reason: str) -> None:
+        """Rebuild a MoAClient from the stored preset name.
+
+        MoA provider does not use OpenAI client kwargs (api_key/base_url);
+        it uses MoAClient which wraps MoAChatCompletions.  All client
+        lifecycle paths (ensure, replace, recover, restore) call this
+        instead of _create_openai_client when provider == 'moa'.
+        """
+        from agent.moa_loop import MoAClient
+
+        preset = self.model or "default"
+        # Preserve reference_callback from the previous client if any.
+        ref_cb = None
+        old = getattr(self, "client", None)
+        if old is not None:
+            try:
+                ref_cb = getattr(old.chat.completions, "reference_callback", None)
+            except Exception:
+                pass
+        self.client = MoAClient(preset, reference_callback=ref_cb)
+        logger.info("MoAClient recreated (%s) preset=%s", reason, preset)
 
     def _cleanup_dead_connections(self) -> bool:
         """Forwarder — see ``agent.agent_runtime_helpers.cleanup_dead_connections``."""
