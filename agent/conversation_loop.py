@@ -616,6 +616,18 @@ def run_conversation(
     # over instead of spinning. Reset here so each turn starts fresh. See #26080.
     agent._auth_pool_refresh_counts = {}
 
+    # ── Model Router: classify task type and switch to best model ──
+    # Runs once per turn, before the first model call. The router reads
+    # model_router config from config.yaml and switches the active
+    # provider/model if the classified task category differs from the
+    # current model.  No-op when model_router.enabled is false (default).
+    try:
+        from agent.model_router import route as _route_model
+
+        _route_model(agent, user_message, original_user_message)
+    except Exception:
+        pass  # Router failure must never block the conversation
+
     # Optional opt-in runtime: if api_mode == codex_app_server, hand the
     # turn to the codex app-server subprocess (terminal/file ops/patching
     # all run inside Codex). Default Hermes path is bypassed entirely.
