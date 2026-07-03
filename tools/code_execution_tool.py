@@ -1153,10 +1153,13 @@ def execute_code(
     # A Docker sandbox with host bind mounts is no longer isolated, so its
     # script does not get the container fast-path.
     from tools.approval import check_execute_code_guard
-    _guard = check_execute_code_guard(
-        code, env_type,
-        has_host_access=_docker_has_host_access(_env_config),
-    )
+    try:
+        _guard = check_execute_code_guard(
+            code, env_type,
+            has_host_access=_docker_has_host_access(_env_config),
+        )
+    except TypeError:
+        _guard = check_execute_code_guard(code, env_type)
     if not _guard.get("approved", False):
         return json.dumps({
             "status": "error",
