@@ -25,12 +25,15 @@ CLASSIFICATION_RULES: List[Tuple[str, int, List[str]]] = [
     ("dialog", 15, [
         # 闲聊、问候、简单问答
         r"(你好|嗨|哈[喽啰]|早上好|下午好|晚上好|晚安|再见|谢谢|不客气)",
+        r"\b(hello|hi|hey|thanks|thx|good.?morning|good.?night)\b",
         r"(聊天|闲聊|随便聊聊|说说话)",
         r"(怎么样|如何|是什么|为什么|什么意思|能不能|可不可以)",
+        r"\b(what|why|when|where|who|can you|could you)\b",
     ]),
     ("coding", 10, [
         # 编程、代码相关 — 中文不用\b
         r"(代码|编程|开发|实现|构建|创建|debug|bug|报错|错误|异常|修复|重构|优化)",
+        r"\b(error|crash|crashing|traceback|stack.?trace|exception|fix|bug.?fix|patch|hotfix)\b",
         r"(python|javascript|typescript|java|rust|golang|go语言|c\+\+|react|vue|flask|django)",
         r"\b(function|class|import|\bdef\b|\basync\b|\bawait\b)",
         r"(refactor|测试|test|单元测试|unit.?test)",
@@ -51,6 +54,7 @@ CLASSIFICATION_RULES: List[Tuple[str, int, List[str]]] = [
     ("analysis", 8, [
         # 数据分析、报告、系统检查
         r"(分析|analy[sz]e|审计|audit|报告|report|统计|数据|检查|扫描|诊断)",
+        r"\b(doctor|diagnose|diagnostic|health.?check|websocket|troubleshoot)\b",
         r"(评估|evaluat|审查|review)",
         r"(汇总|汇总表|报表|dashboard|仪表板)",
         r"(csv|excel|表格|数据表|dataset|\.xlsx|\.csv)",
@@ -163,6 +167,27 @@ def route(agent, user_message: str, original_user_message: str = "") -> bool:
 
     if not target_provider or not target_model:
         return False
+
+    # ── smart 模式：指定类别走 MoA（Fable 5 分析 + DeepSeek 动手）──
+    smart_categories = cfg_get("model_router.smart_categories", [])
+    if category in smart_categories:
+        try:
+            from hermes_cli.config import cfg_set
+            cfg_set("moa.active_preset", "smart")
+            logger.info(
+                "Model router: activated MoA smart for category '%s' (Fable 5→DeepSeek)",
+                category,
+            )
+            return True
+        except Exception as exc:
+            logger.debug("Model router: MoA smart activation failed: %s", exc)
+    else:
+        # 非 smart 类别 → 清除 MoA，走普通模型切换
+        try:
+            from hermes_cli.config import cfg_set
+            cfg_set("moa.active_preset", "")
+        except Exception:
+            pass
 
     # 如果当前已经是目标模型，跳过
     if (current_provider == target_provider and current_model == target_model):
