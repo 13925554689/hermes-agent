@@ -189,11 +189,11 @@ def route(agent, user_message: str, original_user_message: str = "") -> bool:
         except Exception:
             pass
 
-    # 如果当前已经是目标模型，跳过
-    if (current_provider == target_provider and current_model == target_model):
+    # 如果当前已经是目标模型，跳过（provider可能被解析为custom，只比较model名）
+    if current_model == target_model:
         logger.debug(
-            "Model router: already on target %s/%s, skipping switch",
-            target_provider, target_model,
+            "Model router: already on target model '%s', skipping switch",
+            target_model,
         )
         return False
 
