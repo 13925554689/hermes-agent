@@ -2000,22 +2000,34 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         # 'stream_options'`), so omit it only for that endpoint.
         if not is_native_gemini_base_url(agent.base_url):
             stream_kwargs["stream_options"] = {"include_usage": True}
-        request_client = _set_request_client(
-            agent._create_request_openai_client(
-                reason="chat_completion_stream_request",
-                api_kwargs=stream_kwargs,
+        # MoA: moa://local is a virtual URL, creating a raw OpenAI client
+        # on it always raises APIConnectionError.  Route through the MoA
+        # facade (agent.client → MoAChatCompletions.create) which already
+        # handles stream=True natively via call_llm on the real aggregator
+        # endpoint.  ponytail: one branch, reuses existing MoA engine.
+        if agent.base_url == "moa://local":
+            # Reset stale-stream timer so the detector measures from this
+            # attempt's start, not a previous attempt's last chunk.
+            last_chunk_time["t"] = time.time()
+            agent._touch_activity("waiting for provider response (streaming, MoA)")
+            stream = agent.client.chat.completions.create(**stream_kwargs)
+        else:
+            request_client = _set_request_client(
+                agent._create_request_openai_client(
+                    reason="chat_completion_stream_request",
+                    api_kwargs=stream_kwargs,
+                )
             )
-        )
-        # Reset stale-stream timer so the detector measures from this
-        # attempt's start, not a previous attempt's last chunk.
-        last_chunk_time["t"] = time.time()
-        agent._touch_activity("waiting for provider response (streaming)")
-        # Initialize per-attempt stream diagnostics so the retry block can
-        # reach for them after the stream dies.  Lives on
-        # ``request_client_holder["diag"]`` for closure access.
-        _diag = agent._stream_diag_init()
-        request_client_holder["diag"] = _diag
-        stream = request_client.chat.completions.create(**stream_kwargs)
+            # Reset stale-stream timer so the detector measures from this
+            # attempt's start, not a previous attempt's last chunk.
+            last_chunk_time["t"] = time.time()
+            agent._touch_activity("waiting for provider response (streaming)")
+            # Initialize per-attempt stream diagnostics so the retry block can
+            # reach for them after the stream dies.  Lives on
+            # ``request_client_holder["diag"]`` for closure access.
+            _diag = agent._stream_diag_init()
+            request_client_holder["diag"] = _diag
+            stream = request_client.chat.completions.create(**stream_kwargs)
 
         # Some OpenAI-compatible adapters (for example copilot-acp, and the MoA
         # openai-codex aggregator) accept stream=True but still return a
