@@ -213,6 +213,7 @@ def route(agent, user_message: str, original_user_message: str = "") -> bool:
             agent,
             new_model=target_model,
             new_provider=target_provider,
+            base_url=selected.get("base_url", ""),
         )
         return True
     except Exception as exc:
