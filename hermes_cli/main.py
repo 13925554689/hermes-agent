@@ -64,6 +64,22 @@ except ModuleNotFoundError:
 import os
 import sys
 
+# ponytail: clear stale __pycache__ at startup before any project imports.
+# Stale .pyc from git pull / hermes update cause silent ImportError crashes
+# when Python loads bytecode referencing names that moved or were deleted.
+# Must run before hermes_cli.* / agent.* imports — uses only stdlib.
+import shutil as _shutil
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+for _dirpath, _dirnames, _ in os.walk(_PROJECT_ROOT):
+    _dirnames[:] = [d for d in _dirnames
+                    if d not in {"venv", ".venv", "node_modules", ".git", ".worktrees"}]
+    if os.path.basename(_dirpath) == "__pycache__":
+        try:
+            _shutil.rmtree(_dirpath)
+        except OSError:
+            pass
+        _dirnames.clear()
+
 
 def _set_process_title() -> None:
     """Set the process title to 'hermes' so tools like 'ps', 'top', and
