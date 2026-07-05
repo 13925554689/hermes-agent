@@ -14,7 +14,7 @@ import logging
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
-from hermes_cli.config import cfg_get
+from hermes_cli.config import load_config as _load_config
 
 logger = logging.getLogger(__name__)
 
@@ -138,12 +138,13 @@ def route(agent, user_message: str, original_user_message: str = "") -> bool:
         True 如果成功切换了模型，False 如果跳过
     """
     # 检查是否启用
-    enabled = cfg_get("model_router.enabled", False)
+    _cfg = _load_config()
+    enabled = _cfg.get("model_router", {}).get("enabled", False)
     if not enabled:
         return False
 
     # 读取模型池配置
-    pools = cfg_get("model_router.pools", None)
+    pools = _cfg.get("model_router", {}).get("pools", None)
     if not pools or not isinstance(pools, dict):
         logger.debug("Model router disabled: no pools configured")
         return False
@@ -169,7 +170,7 @@ def route(agent, user_message: str, original_user_message: str = "") -> bool:
         return False
 
     # ── smart 模式：指定类别走 MoA（Fable 5 分析 + DeepSeek 动手）──
-    smart_categories = cfg_get("model_router.smart_categories", [])
+    smart_categories = _cfg.get("model_router", {}).get("smart_categories", [])
     if category in smart_categories:
         try:
             from hermes_cli.config import cfg_set
