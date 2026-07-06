@@ -283,7 +283,8 @@ def test_delegate_task_background_routes_async_and_does_not_block(monkeypatch):
     # Single task rides the batch path → carries a 1-item results list.
     assert evt.get("is_batch") is True
     assert len(evt["results"]) == 1
-    assert evt["results"][0]["summary"] == "done: the real task"
+    assert "done: the real task" in evt["results"][0]["summary"]
+    assert "VERIFICATION REQUIRED" in evt["results"][0]["summary"]
     text = format_process_notification(evt)
     assert text is not None
     assert "the real task" in text
@@ -354,7 +355,7 @@ def test_delegate_task_background_batch_runs_as_one_unit(monkeypatch):
     assert evt.get("is_batch") is True
     assert len(evt["results"]) == 3
     summaries = sorted(r["summary"] for r in evt["results"])
-    assert summaries == ["done: a", "done: b", "done: c"]
+    assert all("done:" in s and "VERIFICATION REQUIRED" in s for s in summaries)
     # The consolidated notification names all three tasks in one block.
     text = format_process_notification(evt)
     assert text is not None
