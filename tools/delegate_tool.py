@@ -2657,6 +2657,45 @@ def delegate_task(
         # Covers both the single-task and batch paths. See PR #9126.
         _apply_summary_budget(results, parent_agent)
 
+        # Post-delegation verification marker (Harness primitive 10 / 11).
+        # Subagent summaries are SELF-REPORTS — the child claims to have
+        # written files, uploaded, or succeeded, but those claims are
+        # unverified at this point.  We inject a mandatory verification
+        # directive into every result so the parent model knows it MUST
+        # independently confirm any external side-effects before telling
+        # the user they succeeded.  Controlled by
+        # delegation.verify_subagent_results (default: true — safe).
+        _cfg = _load_config()
+        _verify = _cfg.get("verify_subagent_results", True)
+        if is_truthy_value(_verify):
+            _VERIFY_DIRECTIVE = (
+                "\n\n"
+                + "─" * 48 + "\n"
+                + "⚠️  VERIFICATION REQUIRED — this subagent result is a "
+                + "SELF-REPORT.  The subagent CLAIMS to have completed the "
+                + "task above, but those claims have NOT been independently "
+                + "verified.  Before telling the user the task succeeded, "
+                + "you MUST verify any external side-effects the subagent "
+                + "reports:\n"
+                + "  • Files written → stat/read them yourself\n"
+                + "  • URLs / endpoints → fetch them yourself\n"
+                + "  • Commands / builds → re-run or inspect output yourself\n"
+                + "  • Uploads / deployments → check the remote side yourself\n"
+                + "If verification fails, report the discrepancy honestly — "
+                + "do NOT repeat the subagent's unverified claims as fact.\n"
+                + "─" * 48
+            )
+            for _entry in results:
+                if not isinstance(_entry, dict):
+                    continue
+                _summary = _entry.get("summary")
+                if isinstance(_summary, str) and _summary.strip():
+                    _entry["summary"] = _summary + _VERIFY_DIRECTIVE
+                else:
+                    # Failed/interrupted entries: still warn the parent
+                    # that any reported error might be incomplete.
+                    _entry["verification_required"] = True
+
         # Notify parent's memory provider of delegation outcomes
         if (
             parent_agent
