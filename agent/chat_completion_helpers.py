@@ -2010,6 +2010,7 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             # attempt's start, not a previous attempt's last chunk.
             last_chunk_time["t"] = time.time()
             agent._touch_activity("waiting for provider response (streaming, MoA)")
+            _diag = agent._stream_diag_init()
             stream = agent.client.chat.completions.create(**stream_kwargs)
         else:
             request_client = _set_request_client(
