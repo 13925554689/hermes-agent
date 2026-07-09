@@ -149,6 +149,23 @@ def _slot_runtime(slot: dict[str, str]) -> dict[str, Any]:
     """
     provider = str(slot.get("provider") or "").strip()
     model = str(slot.get("model") or "").strip()
+    # Reject MoA preset names used as literal model names.  A fallback or
+    # misconfiguration can route a preset name ("smart", "default") through
+    # here; catching it before it hits the wire prevents confusing provider
+    # 400s (e.g. DeepSeek: "supported model names are deepseek-v4-pro or
+    # deepseek-v4-flash, but you passed smart").
+    try:
+        from hermes_cli.config import load_config as _slot_load_cfg
+        _slot_presets = (_slot_load_cfg().get("moa") or {}).get("presets") or {}
+        if model and isinstance(_slot_presets, dict) and model in _slot_presets:
+            raise ValueError(
+                f"MoA preset name '{model}' cannot be used as a literal model. "
+                f"Check the aggregator.model in your MoA preset."
+            )
+    except ValueError:
+        raise
+    except Exception:
+        pass
     out: dict[str, Any] = {"provider": provider, "model": model}
     try:
         from hermes_cli.runtime_provider import resolve_runtime_provider
@@ -898,6 +915,22 @@ class MoAChatCompletions:
 
         if aggregator.get("provider") == "moa":
             raise RuntimeError("MoA aggregator cannot be another MoA preset")
+        # Hard-guard: the aggregator model must be a real model, not a MoA
+        # preset name. If preset resolution returns an aggregator whose model
+        # is itself a preset name (e.g. "smart", "default"), refuse to forward
+        # it — this prevents a fallback bypass from sending "smart" as a
+        # literal model name to DeepSeek, which responds HTTP 400.
+        _agg_model = str(aggregator.get("model", "")).strip()
+        _all_preset_names = {
+            p for p in (load_config().get("moa") or {}).get("presets") or {}
+            if isinstance(p, str)
+        }
+        if _agg_model and _agg_model in _all_preset_names:
+            raise RuntimeError(
+                f"MoA aggregator model '{_agg_model}' matches a MoA preset name. "
+                f"Configure aggregator.provider and aggregator.model explicitly "
+                f"in the '{self.preset_name}' preset."
+            )
         agg_kwargs = dict(api_kwargs)
         agg_kwargs["messages"] = agg_messages
         # Record the exact aggregator INPUT (incl. the injected reference
