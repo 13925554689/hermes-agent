@@ -18,6 +18,9 @@ from agent.transports import get_transport
 
 logger = logging.getLogger(__name__)
 
+# Max consecutive reference re-runs per MoA turn before skipping
+_MAX_REF_RERUNS: int = 3
+
 # Upper bound on concurrent reference-model calls. References are independent
 # advisory calls (no tools, no inter-dependence), so we fan them out the same
 # way delegate_task runs a batch: all in flight at once, results collected when
@@ -609,6 +612,13 @@ class MoAChatCompletions:
         # for free, without re-firing on a pure no-op re-call.
         self._ref_cache_key: tuple | None = None
         self._ref_cache_outputs: list[tuple[str, str, Any]] = []
+        # Convergence guard: number of times references were re-run within
+        # the current MoA turn (tool iterations that caused a cache miss).
+        # After _MAX_REF_RERUNS consecutive re-runs (no tool calls advancing
+        # state, just repetitive advice), skip references and let the
+        # aggregator act alone — prevents infinite reference evaluation
+        # loops that burn hours on "task is done" consensus.
+        self._ref_rerun_count: int = 0
         # Token usage + estimated cost of the reference fan-out from the most
         # recent cache-MISS create() call, awaiting consumption by session
         # accounting. Set on every create() (zeroed on a cache HIT so per-turn
@@ -737,12 +747,19 @@ class MoAChatCompletions:
         # view changed (i.e. a new user turn). Within one turn the agent loop
         # calls create() once per tool iteration with the same advisory view;
         # reuse the cached outputs and skip both the re-run and the re-emit.
+        # ponytail: hash user-turn content only, ignoring tool results folded
+        # into assistant turns. Stable across tool iterations within one user
+        # turn; busts naturally when a new user message arrives.
         _sig = hashlib.sha256(
             "\u0000".join(
                 f"{m.get('role')}:{m.get('content')}" for m in ref_messages
+                if m.get("role") == "user"
             ).encode("utf-8", "replace")
         ).hexdigest()
         _cache_key = (self.preset_name, _sig, tuple(_slot_label(s) for s in reference_models))
+        # Reset convergence counter when cache key changes (new user turn)
+        if _cache_key != self._ref_cache_key:
+            self._ref_rerun_count = 0
         _refs_from_cache = _cache_key == self._ref_cache_key and bool(self._ref_cache_outputs)
 
         if _refs_from_cache:
@@ -758,12 +775,21 @@ class MoAChatCompletions:
             # not a new MoA turn.
             self._pending_trace = None
         else:
-            reference_outputs = _run_references_parallel(
-                reference_models,
-                ref_messages,
-                temperature=temperature,
-                max_tokens=None,
-            )
+            self._ref_rerun_count += 1
+            if self._ref_rerun_count > _MAX_REF_RERUNS:
+                # References already evaluated this turn 3+ times — skip
+                # further reruns to prevent infinite loops on "done" consensus.
+                reference_outputs = [
+                    (_slot_label(m), "[skipped: max reruns reached]", _RefAccounting())
+                    for m in reference_models
+                ]
+            else:
+                reference_outputs = _run_references_parallel(
+                    reference_models,
+                    ref_messages,
+                    temperature=temperature,
+                    max_tokens=None,
+                )
             self._ref_cache_key = _cache_key
             self._ref_cache_outputs = list(reference_outputs)
             # Sum the advisor fan-out's token usage AND cost so the caller can
