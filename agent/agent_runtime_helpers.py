@@ -2369,12 +2369,18 @@ def sanitize_api_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]
     #     An assistant may emit multiple tool_calls whose results arrive
     #     as consecutive tool messages. Walk backward past consecutive
     #     tool messages to find the true parent assistant.
+    #
+    #     Also drop tool messages with empty/missing tool_call_id — they
+    #     can never be matched to any assistant and will cause providers
+    #     (DeepSeek, Anthropic) to return HTTP 400.
+    empty_cid_count = 0
     nonadjacent_cids: set = set()
     for i, msg in enumerate(messages):
         if msg.get("role") != "tool":
             continue
         cid = (msg.get("tool_call_id") or "").strip()
         if not cid:
+            empty_cid_count += 1
             continue
         # Walk backward past consecutive tool messages
         j = i - 1
@@ -2391,6 +2397,16 @@ def sanitize_api_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]
         }
         if cid not in parent_ids:
             nonadjacent_cids.add(cid)
+    if empty_cid_count:
+        messages = [
+            m for m in messages
+            if not (m.get("role") == "tool" and not (m.get("tool_call_id") or "").strip())
+        ]
+        _ra().logger.warning(
+            "Pre-call sanitizer: removed %d tool result(s) with empty/missing "
+            "tool_call_id — these cause HTTP 400 on strict providers",
+            empty_cid_count,
+        )
     if nonadjacent_cids:
         messages = [
             m for m in messages
