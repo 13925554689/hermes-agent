@@ -18,8 +18,12 @@ from agent.transports import get_transport
 
 logger = logging.getLogger(__name__)
 
-# Max consecutive reference re-runs per MoA turn before skipping
+# Max consecutive reference re-runs per MoA turn before skipping.
+# Also the convergence-threshold window: if the last N reference texts are
+# near-identical (same hash), skip early — references have converged on a
+# stable assessment and re-running them burns tokens for no new signal.
 _MAX_REF_RERUNS: int = 3
+_CONVERGE_WINDOW: int = 2  # rounds within _MAX_REF_RERUNS to trigger early skip
 
 # Upper bound on concurrent reference-model calls. References are independent
 # advisory calls (no tools, no inter-dependence), so we fan them out the same
@@ -619,6 +623,15 @@ class MoAChatCompletions:
         # aggregator act alone — prevents infinite reference evaluation
         # loops that burn hours on "task is done" consensus.
         self._ref_rerun_count: int = 0
+        # Convergence detection: hash of the last round's reference texts.
+        # When _CONVERGE_WINDOW consecutive rounds produce the same hash,
+        # references have settled on a stable assessment — skip early.
+        self._prev_ref_hash: str | None = None
+        self._converge_streak: int = 0
+        # Hash of user-role messages only — stable within a turn, changes only
+        # on new user input. Used to reset the convergence guard (separate from
+        # the cache key so the guard accumulates across tool-result cache busts).
+        self._user_turn_hash: str | None = None
         # Token usage + estimated cost of the reference fan-out from the most
         # recent cache-MISS create() call, awaiting consumption by session
         # accounting. Set on every create() (zeroed on a cache HIT so per-turn
@@ -743,23 +756,33 @@ class MoAChatCompletions:
         reference_outputs: list[tuple[str, str, Any]] = []
         ref_messages = _reference_messages(messages)
 
-        # Turn-scoped cache: only run + display references when the advisory
-        # view changed (i.e. a new user turn). Within one turn the agent loop
-        # calls create() once per tool iteration with the same advisory view;
-        # reuse the cached outputs and skip both the re-run and the re-emit.
-        # ponytail: hash user-turn content only, ignoring tool results folded
-        # into assistant turns. Stable across tool iterations within one user
-        # turn; busts naturally when a new user message arrives.
+        # Turn-scoped cache: references re-run when the advisory view changes
+        # (new tool results advance state). Within one turn the agent loop calls
+        # create() once per tool iteration; each new tool result changes the
+        # rendered ref_messages → cache miss → references judge the latest state.
+        # A redundant create() with identical state is a cache hit (no re-run).
         _sig = hashlib.sha256(
+            "\u0000".join(
+                f"{m.get('role')}:{m.get('content')}" for m in ref_messages
+            ).encode("utf-8", "replace")
+        ).hexdigest()
+        _cache_key = (self.preset_name, _sig, tuple(_slot_label(s) for s in reference_models))
+        # ── Convergence guard ──
+        # Track user-turn boundary via a separate hash (user-role messages only,
+        # stable within a turn). Reset the rerun counter ONLY on a new user turn,
+        # NOT on tool-result cache busts, so the guard accumulates across
+        # iterations within the same turn.
+        _user_sig = hashlib.sha256(
             "\u0000".join(
                 f"{m.get('role')}:{m.get('content')}" for m in ref_messages
                 if m.get("role") == "user"
             ).encode("utf-8", "replace")
         ).hexdigest()
-        _cache_key = (self.preset_name, _sig, tuple(_slot_label(s) for s in reference_models))
-        # Reset convergence counter when cache key changes (new user turn)
-        if _cache_key != self._ref_cache_key:
+        if _user_sig != self._user_turn_hash:
             self._ref_rerun_count = 0
+            self._prev_ref_hash = None
+            self._converge_streak = 0
+            self._user_turn_hash = _user_sig
         _refs_from_cache = _cache_key == self._ref_cache_key and bool(self._ref_cache_outputs)
 
         if _refs_from_cache:
@@ -776,11 +799,15 @@ class MoAChatCompletions:
             self._pending_trace = None
         else:
             self._ref_rerun_count += 1
-            if self._ref_rerun_count > _MAX_REF_RERUNS:
-                # References already evaluated this turn 3+ times — skip
-                # further reruns to prevent infinite loops on "done" consensus.
+            # ── Convergence detection ──
+            # Before running references, check if they've already converged:
+            # if the last _CONVERGE_WINDOW rounds produced identical advice,
+            # skip early — references are stable and re-running them adds no
+            # signal, only latency and cost.
+            if self._ref_rerun_count > _MAX_REF_RERUNS or self._converge_streak >= _CONVERGE_WINDOW:
+                _why = "max reruns reached" if self._ref_rerun_count > _MAX_REF_RERUNS else "converged"
                 reference_outputs = [
-                    (_slot_label(m), "[skipped: max reruns reached]", _RefAccounting())
+                    (_slot_label(m), f"[skipped: {_why}]", _RefAccounting())
                     for m in reference_models
                 ]
             else:
@@ -790,6 +817,14 @@ class MoAChatCompletions:
                     temperature=temperature,
                     max_tokens=None,
                 )
+                # Hash the reference outputs for convergence tracking.
+                _ref_texts = "|".join(_txt for _lbl, _txt, _acct in reference_outputs)
+                _ref_hash = hashlib.sha256(_ref_texts.encode("utf-8", "replace")).hexdigest()
+                if _ref_hash == self._prev_ref_hash:
+                    self._converge_streak += 1
+                else:
+                    self._prev_ref_hash = _ref_hash
+                    self._converge_streak = 0
             self._ref_cache_key = _cache_key
             self._ref_cache_outputs = list(reference_outputs)
             # Sum the advisor fan-out's token usage AND cost so the caller can
