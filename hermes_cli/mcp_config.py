@@ -234,13 +234,16 @@ def _probe_single_server(
 
     config = _resolve_mcp_server_config(config)
 
+    # Use the server's connect_timeout if configured, otherwise the default
+    probe_timeout = config.get("connect_timeout", connect_timeout)
+
     _ensure_mcp_loop()
 
     tools_found: List[Tuple[str, str]] = []
 
     async def _probe():
         server = await asyncio.wait_for(
-            _connect_server(name, config), timeout=connect_timeout
+            _connect_server(name, config), timeout=probe_timeout
         )
         try:
             for t in server._tools:
@@ -253,7 +256,7 @@ def _probe_single_server(
             await server.shutdown()
 
     try:
-        _run_on_mcp_loop(_probe(), timeout=connect_timeout + 10)
+        _run_on_mcp_loop(_probe(), timeout=probe_timeout + 10)
     except BaseException as exc:
         raise _unwrap_exception_group(exc) from None
     finally:

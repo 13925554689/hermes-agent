@@ -14823,8 +14823,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                     time.sleep(0.1)
                     continue
                 if self._command_running:
-                    self._invalidate(min_interval=0.1)
-                    time.sleep(0.1)
+                    self._invalidate(min_interval=1.0)
+                    time.sleep(1.0)
                 else:
                     # Do not repaint the idle prompt every second. In non-full-screen
                     # prompt_toolkit mode, background redraws can fight tmux/Ghostty/cmux
