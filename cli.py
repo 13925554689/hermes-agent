@@ -5855,17 +5855,14 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
 
     @contextmanager
     def _busy_command(self, status: str):
-        """Expose a temporary busy state in the TUI while a slash command runs."""
         self._command_running = True
         self._command_status = status
-        self._invalidate(min_interval=0.0)
         try:
             print(f"⏳ {status}")
             yield
         finally:
             self._command_running = False
             self._command_status = ""
-            self._invalidate(min_interval=0.0)
 
     def _open_external_editor(self, buffer=None) -> bool:
         """Open the active input buffer in an external editor."""
