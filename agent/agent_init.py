@@ -1026,7 +1026,7 @@ def init_agent(
     # the acting model, and switching to a different model via fallback would
     # silently break the preset (e.g. a reference model like aifast fable-5
     # starts executing tool calls instead of the configured aggregator).
-    _provider = str(_model_section.get("provider", "")).strip().lower()
+    _provider = str(getattr(agent, "provider", "")).strip().lower()
     if _provider == "moa":
         agent._fallback_chain = []
     elif isinstance(fallback_model, list):
