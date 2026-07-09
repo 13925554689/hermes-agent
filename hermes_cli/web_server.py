@@ -8133,7 +8133,9 @@ async def get_session_detail(session_id: str, profile: Optional[str] = None):
         sid = db.resolve_session_id(session_id)
         session = db.get_session(sid) if sid else None
         if not session:
-            raise HTTPException(status_code=404, detail="Session not found")
+            # Session deleted → redirect client to home so they get a fresh session
+            from fastapi.responses import RedirectResponse
+            return RedirectResponse(url="/#/")
         if profile:
             session["profile"] = _cron_profile_home(profile)[0]
         return session
