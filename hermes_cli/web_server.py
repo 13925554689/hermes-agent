@@ -3861,14 +3861,28 @@ def _normalize_config_for_web(config: Dict[str, Any]) -> Dict[str, Any]:
 
     Also surfaces ``model_context_length`` as a top-level field so the web UI can
     display and edit it.  A value of 0 means "auto-detect".
+
+    MoA translation: when the CLI is configured with ``provider: moa`` and a
+    preset name as ``default`` (e.g. ``smart``), the Web UI can't use MoA
+    presets directly — it needs a real provider/model.  Translate to
+    ``deepseek-v4-pro`` so the Web UI has a working default without touching
+    the CLI's config.
     """
     config = dict(config)  # shallow copy
     model_val = config.get("model")
     if isinstance(model_val, dict):
-        # Extract context_length before flattening the dict
+        provider = str(model_val.get("provider", "")).strip().lower()
+        default_model = str(model_val.get("default", model_val.get("name", ""))).strip()
         ctx_len = model_val.get("context_length", 0)
-        config["model"] = model_val.get("default", model_val.get("name", ""))
-        config["model_context_length"] = ctx_len if isinstance(ctx_len, int) else 0
+
+        # MoA preset → real model for Web UI
+        if provider == "moa":
+            config["model"] = "deepseek-v4-pro"
+            config["model_provider"] = "deepseek"
+        else:
+            config["model"] = default_model
+            config["model_provider"] = provider if provider else ""
+        config["model_context_length"] = ctx_len if isinstance(ctx_len, int) else 0        
     else:
         config["model_context_length"] = 0
     return config
@@ -4190,7 +4204,7 @@ def get_model_options(profile: Optional[str] = None, refresh: bool = False):
         # `auth_type`/`key_env`/`warning` so the GUI can render a setup
         # affordance instead of hiding the provider entirely.
         with _profile_scope(profile):
-            return build_models_payload(
+            payload = build_models_payload(
                 load_picker_context(),
                 include_unconfigured=True,
                 picker_hints=True,
@@ -4199,6 +4213,15 @@ def get_model_options(profile: Optional[str] = None, refresh: bool = False):
                 capabilities=True,
                 refresh=bool(refresh),
             )
+            # ── MoA preset → real default for Web UI ──
+            # The CLI uses provider=moa / model=smart for MoA orchestration,
+            # but the Web UI needs a real provider/model.  Translate the
+            # active selection to deepseek-v4-pro so the picker pre-selects a
+            # working model; the CLI config on disk is not modified.
+            if str(payload.get("provider", "")).strip().lower() == "moa":
+                payload["provider"] = "deepseek"
+                payload["model"] = "deepseek-v4-pro"
+            return payload
     except HTTPException:
         raise
     except Exception:
