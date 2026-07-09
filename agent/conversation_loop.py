@@ -3616,7 +3616,22 @@ def run_conversation(
                             agent._buffer_status("⚠️ Provider safety filter blocked this request — trying fallback...")
                         else:
                             agent._buffer_status(f"⚠️ Non-retryable error (HTTP {status_code}) — trying fallback...")
-                    if agent._try_activate_fallback():
+                    # ── MoA guard: never activate fallback when using MoA ──
+                    # MoA is a fixed architecture — the aggregator is the acting
+                    # model, not a provider to fail over from.  Switching to a
+                    # different model in MoA mode silently breaks the preset
+                    # (e.g. aifast fable-5 starts executing tool calls instead of
+                    # the configured deepseek-v4-pro aggregator).
+                    _cur_provider = str(getattr(agent, "provider", "")).strip().lower()
+                    if _cur_provider == "moa" and agent._has_pending_fallback():
+                        agent._vprint(
+                            agent.log_prefix
+                            + "🛡️  MoA guard: refusing fallback activation "
+                            "(provider=moa, fallback would break the preset configuration).",
+                            force=True,
+                        )
+                        agent._fallback_chain = []
+                    elif agent._try_activate_fallback():
                         active_system_prompt = _sync_failover_system_message(
                             agent, api_messages, active_system_prompt)
                         retry_count = 0

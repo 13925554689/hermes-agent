@@ -1020,7 +1020,16 @@ def init_agent(
     # when the primary is exhausted (rate-limit, overload, connection
     # failure).  Supports both legacy single-dict ``fallback_model`` and
     # new list ``fallback_providers`` format.
-    if isinstance(fallback_model, list):
+    #
+    # MoA guard: when the active provider is "moa", do NOT build a fallback
+    # chain.  MoA is a fixed orchestration architecture — the aggregator is
+    # the acting model, and switching to a different model via fallback would
+    # silently break the preset (e.g. a reference model like aifast fable-5
+    # starts executing tool calls instead of the configured aggregator).
+    _provider = str(_model_section.get("provider", "")).strip().lower()
+    if _provider == "moa":
+        agent._fallback_chain = []
+    elif isinstance(fallback_model, list):
         agent._fallback_chain = [
             f for f in fallback_model
             if isinstance(f, dict) and f.get("provider") and f.get("model")

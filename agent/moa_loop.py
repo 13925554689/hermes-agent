@@ -824,7 +824,7 @@ class MoAChatCompletions:
             if self._ref_rerun_count > _MAX_REF_RERUNS or self._converge_streak >= _CONVERGE_WINDOW:
                 _why = "max reruns reached" if self._ref_rerun_count > _MAX_REF_RERUNS else "converged"
                 reference_outputs = [
-                    (_slot_label(m), f"[skipped: {_why}]", _RefAccounting())
+                    (_slot_label(m), f"[skipped: {_why}]", _RefAccounting(usage=CanonicalUsage()))
                     for m in reference_models
                 ]
             else:
@@ -965,16 +965,33 @@ class MoAChatCompletions:
             # actually governs the aggregator stream, not just call_llm's default.
             if api_kwargs.get("timeout") is not None:
                 stream_kwargs["timeout"] = api_kwargs["timeout"]
-        _agg_response = call_llm(
-            task="moa_aggregator",
-            messages=agg_messages,
-            temperature=aggregator_temperature,
-            max_tokens=agg_kwargs.get("max_tokens"),
-            tools=agg_kwargs.get("tools"),
-            extra_body=agg_kwargs.get("extra_body"),
-            **stream_kwargs,
-            **_slot_runtime(aggregator),
-        )
+        # ponytail: single try/except — aggregator failure surfaces as a
+        # clean RuntimeError instead of an uncaught transport exception
+        # from call_llm's internal retry loop. The agent loop's existing
+        # error handling (rate-limit detection, fallback-skip for MoA) can
+        # classify and recover from a RuntimeError the same as any APIError.
+        _agg_label = _slot_label(aggregator)
+        try:
+            _agg_response = call_llm(
+                task="moa_aggregator",
+                messages=agg_messages,
+                temperature=aggregator_temperature,
+                max_tokens=agg_kwargs.get("max_tokens"),
+                tools=agg_kwargs.get("tools"),
+                extra_body=agg_kwargs.get("extra_body"),
+                **stream_kwargs,
+                **_slot_runtime(aggregator),
+            )
+        except Exception as _agg_exc:
+            logger.warning(
+                "MoA aggregator model %s failed in preset %s: %s",
+                _agg_label, self.preset_name, _agg_exc,
+            )
+            raise RuntimeError(
+                f"MoA aggregator {_agg_label} failed in preset "
+                f"'{self.preset_name}': {_agg_exc}"
+            ) from _agg_exc
+
         # Non-streaming path (quiet mode / eval / subagents): the aggregator
         # output is available inline, so capture it into the pending trace now.
         # Streaming path: the aggregator's raw token stream is returned to the
