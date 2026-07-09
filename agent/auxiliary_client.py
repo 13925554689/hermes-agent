@@ -5389,6 +5389,12 @@ def _resolve_task_provider_model(
         cfg_model = str(task_config.get("model", "")).strip() or None
         cfg_base_url = str(task_config.get("base_url", "")).strip() or None
         cfg_api_key = str(task_config.get("api_key", "")).strip() or None
+        # Resolve api_key_env as fallback when literal api_key is empty
+        if not cfg_api_key:
+            key_env = str(task_config.get("api_key_env", "")).strip()
+            if key_env:
+                import os as _os_aux
+                cfg_api_key = _os_aux.getenv(key_env, "") or None
         cfg_api_mode = str(task_config.get("api_mode", "")).strip() or None
 
     # 'auto' is a sentinel meaning "inherit from main runtime / auto-detect", not
