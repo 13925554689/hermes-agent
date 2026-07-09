@@ -2358,6 +2358,56 @@ def sanitize_api_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]
             len(orphaned_results),
         )
 
+    # 1b. Drop tool results that are NOT adjacent to their parent assistant
+    #     message. Context compression or session rotation can insert a
+    #     summary message between assistant(tool_calls) and tool(result).
+    #     ID-based checks pass (the call_id exists somewhere), but the
+    #     provider rejects the orphan because the API contract requires
+    #     tool messages to IMMEDIATELY follow the assistant that emitted
+    #     the tool_calls — adjacency matters, not just existence.
+    #
+    #     An assistant may emit multiple tool_calls whose results arrive
+    #     as consecutive tool messages. Walk backward past consecutive
+    #     tool messages to find the true parent assistant.
+    nonadjacent_cids: set = set()
+    for i, msg in enumerate(messages):
+        if msg.get("role") != "tool":
+            continue
+        cid = (msg.get("tool_call_id") or "").strip()
+        if not cid:
+            continue
+        # Walk backward past consecutive tool messages
+        j = i - 1
+        while j >= 0 and messages[j].get("role") == "tool":
+            j -= 1
+        parent = messages[j] if j >= 0 else None
+        if parent is None or parent.get("role") != "assistant":
+            nonadjacent_cids.add(cid)
+            continue
+        parent_ids = {
+            _ra().AIAgent._get_tool_call_id_static(tc)
+            for tc in (parent.get("tool_calls") or [])
+            if _ra().AIAgent._get_tool_call_id_static(tc)
+        }
+        if cid not in parent_ids:
+            nonadjacent_cids.add(cid)
+    if nonadjacent_cids:
+        messages = [
+            m for m in messages
+            if not (m.get("role") == "tool" and (m.get("tool_call_id") or "").strip() in nonadjacent_cids)
+        ]
+        # Keep step 2 in sync: remove dropped CIDs from result_call_ids
+        # so missing_results detection injects stubs for the assistant
+        # calls whose results were dropped.
+        result_call_ids -= nonadjacent_cids
+        _ra().logger.warning(
+            "Pre-call sanitizer: removed %d non-adjacent tool result(s) "
+            "(tool message not immediately after its parent assistant) — "
+            "compression or session resume may have inserted messages "
+            "between the pair",
+            len(nonadjacent_cids),
+        )
+
     # 2. Inject stub results for calls whose result was dropped
     missing_results = surviving_call_ids - result_call_ids
     if missing_results:

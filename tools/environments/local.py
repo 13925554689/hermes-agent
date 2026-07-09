@@ -374,6 +374,12 @@ def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = Non
     for _marker in _ACTIVE_VENV_MARKER_VARS:
         sanitized.pop(_marker, None)
 
+    # Windows UTF-8 safety for terminal/execute_code subprocesses (#31420).
+    # 中文 Windows 默认 GBK → subprocess.Popen(text=True) 的 _readerthread
+    # 在线程中 UnicodeDecodeError → 管道未排空 → 进程假死 → 父进程超时重启。
+    # 与 hermes_subprocess_env() 的同一行对齐。
+    sanitized.setdefault("PYTHONUTF8", "1")
+
     return sanitized
 
 

@@ -132,6 +132,54 @@ class TestSanitizeApiMessages:
         assert len(tool_msgs) == 1
         assert tool_msgs[0]["tool_call_id"] == "c_valid"
 
+    # ── Non-adjacent orphan detection (adjacency guard) ──────────────
+
+    def test_non_adjacent_tool_result_dropped(self):
+        """Tool result not immediately after its parent assistant → dropped, stub injected."""
+        msgs = [
+            {"role": "assistant", "tool_calls": [assistant_dict_call("c1")]},
+            {"role": "user", "content": "[CONTEXT COMPACTION — REFERENCE ONLY]"},  # summary in between
+            tool_result("c1"),  # orphaned by compression boundary
+            {"role": "assistant", "content": "let me help"},
+        ]
+        out = AIAgent._sanitize_api_messages(msgs)
+        # c1's tool result removed; stub injected after assistant
+        tool_msgs = [m for m in out if m["role"] == "tool"]
+        assert len(tool_msgs) == 1
+        assert tool_msgs[0]["tool_call_id"] == "c1"
+        assert "unavailable" in tool_msgs[0]["content"].lower()
+        # user summary message preserved
+        assert any(m.get("role") == "user" for m in out)
+
+    def test_adjacent_multi_tool_calls_preserved(self):
+        """Consecutive tool results after a multi-tool-call assistant — all kept."""
+        msgs = [
+            {"role": "assistant", "tool_calls": [
+                assistant_dict_call("c1"), assistant_dict_call("c2")
+            ]},
+            tool_result("c1"),
+            tool_result("c2"),
+        ]
+        out = AIAgent._sanitize_api_messages(msgs)
+        assert len(out) == 3
+        assert out[1]["tool_call_id"] == "c1"
+        assert out[2]["tool_call_id"] == "c2"
+
+    def test_non_adjacent_after_compression_scenario(self):
+        """Real compression scenario: good pair → reply → summary → orphan tool."""
+        msgs = [
+            {"role": "assistant", "tool_calls": [assistant_dict_call("c_good")]},
+            tool_result("c_good"),
+            {"role": "assistant", "content": "got it, now looking at..."},
+            {"role": "user", "content": "[CONTEXT COMPACTION]"},
+            tool_result("c_orphan"),  # parent assistant was compressed away
+        ]
+        out = AIAgent._sanitize_api_messages(msgs)
+        tool_msgs = [m for m in out if m["role"] == "tool"]
+        assert any(m["tool_call_id"] == "c_good" for m in tool_msgs)
+        assert not any(m.get("tool_call_id") == "c_orphan" for m in tool_msgs)
+        assert any("CONTEXT COMPACTION" in str(m.get("content", "")) for m in out)
+
 
 # ---------------------------------------------------------------------------
 # Phase 2a — _cap_delegate_task_calls
