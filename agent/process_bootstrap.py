@@ -193,7 +193,13 @@ def build_keepalive_http_client(
 
 
 def _install_safe_stdio() -> None:
-    """Wrap stdout/stderr so best-effort console output cannot crash the agent."""
+    """Wrap stdout/stderr so best-effort console output cannot crash the agent.
+
+    Also sets PYTHONUTF8=1 so all subprocess.Popen(text=True) defaults to
+    UTF-8, preventing GBK _readerthread crashes on Chinese Windows (#55106).
+    """
+    import os as _os_st
+    _os_st.environ.setdefault("PYTHONUTF8", "1")
     for stream_name in ("stdout", "stderr"):
         stream = getattr(sys, stream_name, None)
         if stream is not None and not isinstance(stream, _SafeWriter):
