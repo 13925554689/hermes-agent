@@ -278,6 +278,8 @@ import shutil
 import stat
 import subprocess
 from pathlib import Path
+
+from hermes_cli._subprocess_compat import windows_hide_flags
 from typing import Optional
 
 
@@ -1180,7 +1182,8 @@ def _probe_container(cmd: list, backend: str, via_sudo: bool = False):
     all other exceptions propagate naturally.
     """
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=15,
+                              creationflags=windows_hide_flags())
     except subprocess.TimeoutExpired:
         label = f"sudo {backend}" if via_sudo else backend
         print(
@@ -1646,6 +1649,7 @@ def _ensure_tui_node() -> None:
             encoding="utf-8",
             errors="replace",
             check=False,
+            creationflags=windows_hide_flags(),
         )
     except (OSError, subprocess.SubprocessError):
         return
@@ -1695,6 +1699,7 @@ def _restore_tui_workspace(tui_dir: Path) -> bool:
             capture_output=True,
             text=True,
             check=False,
+            creationflags=windows_hide_flags(),
         )
     except OSError:
         return False
@@ -1833,6 +1838,7 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
             encoding="utf-8",
             errors="replace",
             env={**os.environ, "CI": "1"},
+            creationflags=windows_hide_flags(),
         )
         if result.returncode != 0:
             combined = f"{result.stdout or ''}\n{result.stderr or ''}".strip()
@@ -1858,6 +1864,7 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
             text=True,
             encoding="utf-8",
             errors="replace",
+            creationflags=windows_hide_flags(),
         )
         if result.returncode != 0:
             combined = f"{result.stdout or ''}{result.stderr or ''}".strip()
@@ -1888,6 +1895,7 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
             text=True,
             encoding="utf-8",
             errors="replace",
+            creationflags=windows_hide_flags(),
         )
         if result.returncode != 0:
             combined = f"{result.stdout or ''}{result.stderr or ''}".strip()
