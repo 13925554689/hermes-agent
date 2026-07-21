@@ -30,6 +30,9 @@ from typing import Any, Optional
 
 from utils import base_url_hostname, normalize_proxy_url
 
+# ponytail: Windows GBK _readerthread crashes without this; set early.
+os.environ.setdefault("PYTHONUTF8", "1")
+
 
 # Cached at module level so we only pay the OpenAI SDK import cost once
 # per process (after the first lazy load).
