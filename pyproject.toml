@@ -219,6 +219,9 @@ wake = [
   # macOS equivalent, bridged in tools/wake_word.py.
   "ai-edge-litert==2.1.6; platform_system == 'Darwin'",
 ]
+# SaaS watchdog deps — app_saas.py (D:\工程造价法规库智能体) runs inside the
+# Hermes venv via healthcheck cron → watchdog → sys.executable.
+saas = ["flask==3.1.3", "flask-cors==6.0.5", "waitress==3.0.2"]
 honcho = ["honcho-ai==2.2.0"]
 # Cloud memory providers — opt-in, lazy-installed via tools/lazy_deps.py
 # (memory.supermemory / memory.mem0) at first use. Exact pins MUST match the
