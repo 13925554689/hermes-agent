@@ -1341,6 +1341,47 @@ def _on_server_started(
             _log.warning("event loop stalled %.1fs (GIL pressure suspected)", drift)
         _hb_loop.call_later(_hb_interval, _loop_heartbeat, now + _hb_interval)
 
+    # Memory pressure monitor: capture process and system state when thresholds are crossed
+    # so unexpected exits can be traced to resource exhaustion (#140706 sibling).
+    _mem_check_interval = 10.0
+    _mem_check_loop = asyncio.get_running_loop()
+    _last_mem_warning = 0.0
+
+    def _memory_snapshot() -> None:
+        nonlocal _last_mem_warning
+        try:
+            now = time.time()
+            if now - _last_mem_warning < 60:
+                _mem_check_loop.call_later(_mem_check_interval, _memory_snapshot)
+                return
+            try:
+                import psutil
+            except ImportError:
+                _mem_check_loop.call_later(_mem_check_interval, _memory_snapshot)
+                return
+            proc = psutil.Process()
+            own_mem_mb = proc.memory_info().rss / 1024 / 1024
+            sys_mem = psutil.virtual_memory()
+            sys_used_pct = sys_mem.percent
+            if own_mem_mb > 500 or sys_used_pct > 80:
+                _last_mem_warning = now
+                top_procs = []
+                for p in psutil.process_iter(['pid', 'name', 'memory_info']):
+                    try:
+                        top_procs.append((p.info['pid'], p.info['name'], p.info['memory_info'].rss / 1024 / 1024))
+                    except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                        pass
+                top_procs = sorted(top_procs, key=lambda x: x[2], reverse=True)[:5]
+                _log.warning(
+                    "memory pressure: self=%dMB sys_used=%d%% top_5=%s",
+                    own_mem_mb, sys_used_pct,
+                    [(p, n, f"{m:.0f}MB") for p, n, m in top_procs],
+                )
+        except Exception:
+            pass
+        _mem_check_loop.call_later(_mem_check_interval, _memory_snapshot)
+
+    _mem_check_loop.call_later(_mem_check_interval, _memory_snapshot)
     _hb_loop.call_later(_hb_interval, _loop_heartbeat, _hb_loop.time() + _hb_interval)
 
 

@@ -12,6 +12,9 @@ import time
 
 # The owner's protocol name; session_contract is dependency-free (no config/plugins load).
 from gateway.session_contract import CANONICAL_GATEWAY_PROTOCOL as GATEWAY_WS_PROTOCOL
+# ``rpc`` reports transport failures as ``GatewayClientError``; the websockets base class is imported
+# here (module cost already paid by the dial path) so the conversion needs no import per request.
+from websockets.exceptions import WebSocketException
 
 GATEWAY_WS_TICKET_PREFIX = "hermes-gateway-ticket."
 # Per-request answer budget. Owner verbs are admissions/reads that answer promptly; the one that
@@ -215,7 +218,13 @@ class GatewayClient:
     async def rpc(self, method, *, _timeout=None, **params):
         """Send one request and await its answer; ``_timeout`` (seconds, never sent on the wire)
         overrides ``DEFAULT_RPC_TIMEOUT`` for a verb that legitimately takes longer (``math.inf``: no
-        deadline; the answer, a hang-up or the caller's cancel ends the wait)."""
+        deadline; the answer, a hang-up or the caller's cancel ends the wait).
+
+        A transport failure is reported as ``GatewayClientError``, never as the websockets exception
+        it came from: callers catch that one type (``gateway_tools`` background polls, the CLI's
+        spinner thread), and a keepalive ``ConnectionClosedError`` escaping raw killed the thread
+        with a traceback (#140706 sibling). ``TimeoutError`` stays distinct for ``call_tagged``,
+        which words it as "did not answer)."""
         from websockets.protocol import State
         if self.websocket.state is not State.OPEN or (self.reader is not None and self.reader.done()):
             # A closing socket (a keepalive timeout fails it, then waits up to close_timeout for the
@@ -236,6 +245,10 @@ class GatewayClient:
                 raise GatewayClientError(DISCONNECTED) from exc
             budget = DEFAULT_RPC_TIMEOUT if _timeout is None else _timeout
             return await asyncio.wait_for(future, None if budget == float("inf") else budget)
+        except (GatewayClientError, TimeoutError):
+            raise
+        except (WebSocketException, OSError) as exc:
+            raise GatewayClientError("Gateway connection lost; no local fallback") from exc
         finally:
             self.pending.pop(rid, None)
             if future.done() and not future.cancelled():
@@ -329,6 +342,7 @@ async def connect_gateway(endpoint=None, subject=None, *, max_size=8 * 1024 * 10
     from hermes_constants import get_hermes_home
     from hermes_cli.gateway_runtime import attachable, ensure_gateway_runtime, gateway_profile_home
     from hermes_cli.gateway_runtime_discovery import DiscoveryError
+    from hermes_cli.web_server_boundary import _LOOPBACK_HOST_VALUES
     from urllib.parse import urlsplit
 
     remote = "" if endpoint is not None else os.environ.get("HERMES_TUI_GATEWAY_URL", "").strip()
@@ -370,8 +384,18 @@ async def connect_gateway(endpoint=None, subject=None, *, max_size=8 * 1024 * 10
         # The gateway is a loopback (or explicitly named) peer, never something to route through the
         # user's HTTP(S) proxy; websockets>=14 reads HTTP_PROXY/HTTPS_PROXY by default and a proxy that
         # cannot reach 127.0.0.1 turns every launch into a 10 s open timeout.
+        # No protocol ping on a loopback peer: websockets defaults to 20/20, and the pong is served by
+        # the gateway's own event loop. A GIL-starved stall there (minutes on a big turn) makes a
+        # healthy local socket die as ``1011 keepalive ping timeout`` mid-conversation. The ping only
+        # detects half-open links (dropped tunnels, laptops sleeping), impossible on loopback where a
+        # dead peer sends a real FIN/RST. The gateway already disables it for the same reason
+        # (web_server.py); the viewer must match, or the viewer is the weak side. A tunnel/bridge the
+        # user named explicitly keeps the keepalive that can detect it.
+        _parsed = urlsplit(url)
+        _ping = ({"ping_interval": None, "ping_timeout": None}
+                 if (_parsed.hostname or "") in _LOOPBACK_HOST_VALUES else {})
         async with connect(url, subprotocols=protocols, open_timeout=10, max_size=max_size,
-                           proxy=None) as ws:
+                           proxy=None, **_ping) as ws:
             if protocols and ws.subprotocol != GATEWAY_WS_PROTOCOL:
                 raise GatewayClientError("Gateway protocol mismatch; update/restart required")
             async with GatewayClient(ws) as client:

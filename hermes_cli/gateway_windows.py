@@ -589,7 +589,12 @@ def _install_scheduled_task(task_name: str, script_path: Path) -> tuple[bool, st
     xml_path.write_text(_build_scheduled_task_xml(task_name, launcher_path, user), encoding="utf-16", newline="")
     # Immediate manual starts use _spawn_detached(). See #45599.
     base = ["/Create", "/F", "/TN", task_name, "/XML", str(xml_path)]
-    variants = [[*base, "/RU", user, "/NP", "/IT"], base] if user else [base]
+    # Never pass /NP beside the XML: it drops the password and schtasks rewrites the principal's
+    # <LogonType>InteractiveToken</LogonType> to S4U, which starts the gateway in Session 0.
+    # The interactive CLI then cannot reach its control pipe ("Gateway connection failed; no local
+    # fallback"), and its bash/tool environment is the session-0 one. The XML already carries the
+    # interactive principal, so the plain variant is the only one needed.
+    variants = [[*base, "/RU", user, "/IT"], base] if user else [base]
     last_code, last_err = 1, ""
     try:
         for argv in variants:
@@ -1451,6 +1456,9 @@ _TASK_DRIFT_LEAVES = {
     "Task/Settings/RestartOnFailure/Interval": "RestartOnFailure",
     "Task/Triggers/LogonTrigger/Delay": "LogonTrigger Delay",
     "Task/Actions/Exec/Arguments": "launcher arguments",
+    # A re-registration that passed /NP turns InteractiveToken into S4U; comparing it catches the
+    # Session-0 gateway (unreachable from the interactive CLI) before it breaks the next launch.
+    "Task/Principals/Principal/LogonType": "LogonType",
 }
 
 

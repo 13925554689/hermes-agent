@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -112,9 +113,12 @@ def _run_phase_command(
 def _poll_readiness(url: str, timeout: float, interval: float = 1.0) -> tuple[bool, int | None, str | None]:
     deadline = time.monotonic() + timeout
     last_error: str | None = None
+    # Loopback probes must never ride a system/registry proxy (kdl-style proxies
+    # reject 127.0.0.1 targets with Errno 10061 forever -> readiness never fires).
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     while time.monotonic() < deadline:
         try:
-            with urllib.request.urlopen(url, timeout=5) as resp:
+            with opener.open(url, timeout=5) as resp:
                 return True, resp.status, None
         except urllib.error.HTTPError as exc:
             # The server answered — it is up, even if it returned 4xx/5xx.
@@ -173,20 +177,38 @@ def _run_start_phase(
     port = port_override or recipe.port or 8000
     url = f"http://127.0.0.1:{port}{recipe.readiness_path}"
     started = time.monotonic()
-    # Owned: the app leads its own group (clean group teardown below) and that group dies with this
-    # process if it is killed mid-poll, instead of leaving the dev server running on the port.
-    proc = spawn_owned(recipe.start, purpose="verify-app", cwd=str(root), **_SUBPROCESS_KW)
-    output = ""
+    # stdout must NOT be a PIPE here: a chatty app (DAP logs megabytes during init)
+    # fills the pipe buffer and then blocks forever on its next log write — it never
+    # reaches ``app.run()`` and readiness times out with connection-refused. A file
+    # never blocks the child; we tail it after teardown.
+    out = tempfile.TemporaryFile(mode="w+", encoding="utf-8", errors="replace")
+    try:
+        proc = spawn_owned(recipe.start, purpose="verify-app", cwd=str(root),
+                           **{**_SUBPROCESS_KW, "stdout": out})
+    except BaseException:
+        out.close()
+        raise
     try:
         ready, status, error = _poll_readiness(url, ready_timeout)
     finally:
+        # Windows footgun: on Windows a venv python.exe is a forwarder, so the real
+        # interpreter is a grandchild. _terminate_process_group only kills the direct
+        # child — once the launcher dies, taskkill /T can no longer find the tree.
+        # So taskkill the whole tree FIRST, while the launcher pid is still alive.
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                           check=False, capture_output=True, timeout=15)
         _terminate_process_group(proc)
         if proc.poll() is not None:
             release_process_group_once_empty(proc.pid, proc=proc)
+        # ponytail: full read; the file only lives for one verify run — seek-based
+        # tail needs binary mode, switch if a chatty app ever fills the disk.
         try:
-            output = proc.stdout.read() or "" if proc.stdout is not None else ""
+            out.seek(0)
+            output = out.read()
         except (OSError, ValueError):
             output = ""
+        out.close()
     return ReadinessResult(url, ready, status, time.monotonic() - started, error, _tail(output))
 
 

@@ -409,7 +409,14 @@ class CLITuiMixin:
                 continue
             monitor = getattr(self, "_subagent_monitor", None)
             if monitor is not None:
-                monitor.tick()
+                # A poll of the gateway must never end this thread: it is the only repainter, and a
+                # dead one freezes the dock until the CLI is restarted. ``tick`` catches the errors it
+                # knows; a transport failure it did not is one missed frame, not a fatal one.
+                try:
+                    monitor.tick()
+                except Exception:  # health: allow BLE001 -- UI thread outlives any single poll
+                    from cli import logger
+                    logger.debug("subagent monitor tick failed", exc_info=True)
             if self._command_running:
                 self._invalidate(min_interval=0.1)
                 time.sleep(0.1)

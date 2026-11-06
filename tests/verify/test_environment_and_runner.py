@@ -4,6 +4,7 @@ import http.server
 import json
 import os
 import subprocess
+import sys
 import threading
 import time
 from unittest.mock import MagicMock, patch
@@ -207,7 +208,9 @@ class TestReadiness:
         port = _free_port()
         recipe = Recipe(
             name="x",
-            start=f"python3 -m http.server {port} --bind 127.0.0.1",
+            # sys.executable, not "python3": on Windows the python3.exe in
+            # WindowsApps is the Store stub (exit 49, serves nothing).
+            start=f'"{sys.executable}" -m http.server {port} --bind 127.0.0.1',
             port=port,
         )
         result = run_verify(tmp_path, recipe, phases=("start",), ready_timeout=15)
